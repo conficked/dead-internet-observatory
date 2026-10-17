@@ -20,9 +20,10 @@ env/
 coverage.xml
 htmlcov/
 
-# ── Data — all local data stays out of git ───────────────────────────────────
+# ── Data — raw and scored local data stays out of git ───────────────────────────────────
 # Bronze/Silver/Gold flow through GitHub Artifacts and Hugging Face Datasets.
-# observatory.db is a local pipeline artifact — dashboard reads from Supabase.
+# observatory.db is a local pipeline artifact; dashboard reads a published snapshot.
+# Small data/timeline/ aggregates are intentionally tracked.
 data/bronze/
 data/silver/
 data/gold/
