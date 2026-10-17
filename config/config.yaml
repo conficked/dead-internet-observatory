@@ -1,7 +1,7 @@
 project:
   name: Dead Internet Observatory
   version: 1.0.0
-  description: Tracking the synthetic takeover of the public internet
+  description: Observational signals in sampled public web text
 
 storage:
   backend: local          # 'local' or 's3'
@@ -18,7 +18,7 @@ sources:
     # Quarterly snapshots — format CC-MAIN-YYYY-WW
     # 2012 uses older single-crawl naming; 2013+ use YYYY-WW weekly format
     crawl_dates:
-      # 2013 — pre-AI baseline
+      # 2013 — configured crawl dates
       - "2013-20"
       - "2013-48"
       # 2014
@@ -36,7 +36,7 @@ sources:
       # 2018
       - "2018-09"
       - "2018-43"
-      # 2019 — established baseline
+      # 2019 — configured crawl dates
       - "2019-09"
       - "2019-22"
       - "2019-35"
@@ -225,13 +225,7 @@ analytics:
   index_smoothing_window: 21       # days for rolling average
   anomaly_zscore_threshold: 2.5
   trend_min_data_points: 14
-  historical_baseline_year: 2019   # "pre-AI" baseline reference
 
 app:
-  demo_mode: false       # generate synthetic data if no real data found
   cache_ttl_seconds: 3600
   refresh_hint_seconds: 300
-  # Historical starting score (estimated pre-ChatGPT era)
-  baseline_aliveness: 78.0
-  # Current estimated score
-  current_aliveness: 41.3

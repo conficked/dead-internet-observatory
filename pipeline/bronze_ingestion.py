@@ -20,6 +20,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
+from minions.base_minion import BaseMinion
+
 
 # ── Unified schema for silver layer ─────────────────────────────────────────
 
@@ -94,7 +96,7 @@ def _normalise_common_crawl(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt": raw.get("date"),
         "crawl_partition": partition,
         "ingested_at": raw.get("_ingested_at", ""),
-        "content_hash": raw.get("content_hash", ""),
+        "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -117,7 +119,7 @@ def _normalise_reddit(raw: Dict, partition: str) -> List[Dict]:
             "created_dt": raw.get("created_dt"),
             "crawl_partition": partition,
             "ingested_at": raw.get("_ingested_at", ""),
-            "content_hash": raw.get("content_hash", ""),
+            "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
         })
 
     for comment in raw.get("comments", []):
@@ -136,7 +138,7 @@ def _normalise_reddit(raw: Dict, partition: str) -> List[Dict]:
                 "created_dt": comment.get("created_dt"),
                 "crawl_partition": partition,
                 "ingested_at": raw.get("_ingested_at", ""),
-                "content_hash": comment.get("content_hash", ""),
+                "content_hash": comment.get("content_hash") or BaseMinion.content_hash(ct),
             })
 
     return docs
@@ -160,7 +162,7 @@ def _normalise_news(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt": raw.get("pub_date") or raw.get("feed_published"),
         "crawl_partition": partition,
         "ingested_at": raw.get("_ingested_at", ""),
-        "content_hash": raw.get("content_hash", ""),
+        "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -183,7 +185,7 @@ def _normalise_wikipedia(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt": raw.get("last_edit_ts"),
         "crawl_partition": partition,
         "ingested_at": raw.get("_ingested_at", ""),
-        "content_hash": raw.get("content_hash", ""),
+        "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -206,7 +208,7 @@ def _normalise_hackernews(raw: Dict, partition: str) -> List[Dict]:
             "created_dt": raw.get("created_dt"),
             "crawl_partition": partition,
             "ingested_at": raw.get("_ingested_at", ""),
-            "content_hash": raw.get("content_hash", ""),
+            "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
         })
 
     for comment in raw.get("comments", []):
@@ -225,7 +227,7 @@ def _normalise_hackernews(raw: Dict, partition: str) -> List[Dict]:
                 "created_dt": comment.get("created_dt"),
                 "crawl_partition": partition,
                 "ingested_at": raw.get("_ingested_at", ""),
-                "content_hash": comment.get("content_hash", ""),
+                "content_hash": comment.get("content_hash") or BaseMinion.content_hash(ct),
             })
 
     return docs
@@ -250,7 +252,7 @@ def _normalise_wayback(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt": raw.get("snapshot_date"),
         "crawl_partition": str(raw.get("snapshot_year", partition)),
         "ingested_at": raw.get("_ingested_at", ""),
-        "content_hash": raw.get("content_hash", ""),
+        "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -271,7 +273,7 @@ def _normalise_bluesky(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt": raw.get("created_at"),
         "crawl_partition": partition,
         "ingested_at": raw.get("_ingested_at", ""),
-        "content_hash": raw.get("cid", ""),
+        "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -294,7 +296,7 @@ def _normalise_fourchan(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt": _unix_to_iso(raw.get("timestamp")),
         "crawl_partition": partition,
         "ingested_at": raw.get("_ingested_at", ""),
-        "content_hash": "",
+        "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -315,7 +317,7 @@ def _normalise_steam(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt": _unix_to_iso(raw.get("timestamp_created")),
         "crawl_partition": partition,
         "ingested_at": raw.get("_ingested_at", ""),
-        "content_hash": raw.get("review_id", ""),
+        "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -336,7 +338,7 @@ def _normalise_youtube(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt": raw.get("published_at", ""),
         "crawl_partition": partition,
         "ingested_at": raw.get("_ingested_at", ""),
-        "content_hash": raw.get("comment_id", ""),
+        "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -358,7 +360,7 @@ def _normalise_linkedin(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt": raw.get("published_at", ""),
         "crawl_partition": partition,
         "ingested_at": raw.get("_ingested_at", ""),
-        "content_hash": "",
+        "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -379,7 +381,7 @@ def _normalise_twitter(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt": raw.get("created_at", ""),
         "crawl_partition": partition,
         "ingested_at": raw.get("_ingested_at", ""),
-        "content_hash": raw.get("tweet_id", ""),
+        "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -401,7 +403,7 @@ def _normalise_stackoverflow(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt":      raw.get("created_at", ""),
         "crawl_partition": partition,
         "ingested_at":     raw.get("_ingested_at", ""),
-        "content_hash":    identifier,
+        "content_hash":    raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -423,7 +425,7 @@ def _normalise_mastodon(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt":      raw.get("created_at", ""),
         "crawl_partition": partition,
         "ingested_at":     raw.get("_ingested_at", ""),
-        "content_hash":    raw.get("status_id", ""),
+        "content_hash":    raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -444,7 +446,7 @@ def _normalise_substack(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt":      raw.get("published_at", ""),
         "crawl_partition": partition,
         "ingested_at":     raw.get("_ingested_at", ""),
-        "content_hash":    raw.get("post_id", ""),
+        "content_hash":    raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 
@@ -466,7 +468,7 @@ def _normalise_github(raw: Dict, partition: str) -> Optional[Dict]:
         "created_dt":      raw.get("pushed_at") or raw.get("created_at", ""),
         "crawl_partition": partition,
         "ingested_at":     raw.get("_ingested_at", ""),
-        "content_hash":    identifier,
+        "content_hash":    raw.get("content_hash") or BaseMinion.content_hash(text),
     }
 
 

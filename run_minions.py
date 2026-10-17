@@ -17,7 +17,6 @@ Usage:
     python run_minions.py linkedin
     python run_minions.py twitter
     python run_minions.py pipeline      # bronze → silver → gold
-    python run_minions.py seed-demo     # populate SQLite with synthetic data
 """
 
 import argparse
@@ -95,11 +94,6 @@ def cmd_pipeline(_args):
     SilverToGoldPipeline().run()
 
 
-def cmd_seed_demo(_args):
-    from analytics.aliveness_index import seed_demo_data
-    seed_demo_data()
-
-
 def cmd_all(args):
     for fn in [cmd_reddit, cmd_news, cmd_wikipedia, cmd_hackernews,
                cmd_bluesky, cmd_fourchan, cmd_steam, cmd_linkedin, cmd_twitter,
@@ -122,7 +116,6 @@ COMMANDS = {
     "linkedin":    cmd_linkedin,
     "twitter":     cmd_twitter,
     "pipeline":    cmd_pipeline,
-    "seed-demo":   cmd_seed_demo,
 }
 
 if __name__ == "__main__":

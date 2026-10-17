@@ -4,25 +4,16 @@ Index & Analytics Agent — Internet Aliveness Index (IAI) computation.
 The IAI is a composite 0–100 score measuring how much of the sampled
 internet appears authentically human versus synthetic/automated.
 
-100 = completely human
- 50 = roughly half synthetic
-  0 = dead internet (all bots/AI)
-
-The index is:
-  1. Computed per document from the detection pipeline
-  2. Aggregated per source/category per day
-  3. Smoothed with a configurable rolling window
-  4. Stored in SQLite for the Streamlit app to query
-
-Historical reconstruction uses multiple crawl dates to show the
-decay from ~78 (pre-ChatGPT baseline) to current levels.
+Scores describe heuristic human-like signals, not calibrated AI probabilities.
+Daily source/category summaries are stored alongside document scores so delta
+ingestion can recompute exact statistics without counting a document twice.
 """
 
-import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -32,6 +23,15 @@ import yaml
 # ── Database schema ───────────────────────────────────────────────────────────
 
 CREATE_TABLES = """
+CREATE TABLE IF NOT EXISTS ingested_docs (
+    doc_id TEXT PRIMARY KEY,
+    date TEXT NOT NULL,
+    source TEXT NOT NULL,
+    category TEXT NOT NULL,
+    aliveness_score REAL NOT NULL,
+    domain TEXT
+);
+CREATE INDEX IF NOT EXISTS ingested_docs_group ON ingested_docs(date, source, category);
 CREATE TABLE IF NOT EXISTS daily_index (
     date TEXT NOT NULL,
     source TEXT NOT NULL,
@@ -120,155 +120,120 @@ class AlivenessIndexEngine:
 
     # ── Index computation ─────────────────────────────────────────────────────
 
-    def ingest_scored_df(self, df: pd.DataFrame, replace_affected_dates: bool = False):
-        """
-        Take a scored silver DataFrame (output of ai_content_detector.score_dataframe)
-        and compute daily index values, inserting/replacing rows in SQLite.
-        """
-        if df.empty or "aliveness_score" not in df.columns:
-            print("[INDEX] Nothing to ingest — empty or missing aliveness_score")
-            return
-
+    @staticmethod
+    def _valid_dated_docs(df):
         df = df.copy()
+        dates = pd.to_datetime(df.get("created_dt", pd.Series(pd.NaT, index=df.index)),
+                               errors="coerce", utc=True, format="mixed")
+        missing = dates.isna()
+        future = dates > pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=1)
+        logging.getLogger(__name__).info(
+            "[INDEX] Dropped %d null created_dt rows and %d future created_dt rows",
+            int(missing.sum()), int(future.sum()))
+        df = df.loc[~(missing | future)].copy()
+        df["date"] = dates.loc[df.index].dt.strftime("%Y-%m-%d")
+        df["aliveness_score"] = pd.to_numeric(df["aliveness_score"], errors="coerce")
+        return df.loc[np.isfinite(df["aliveness_score"])].copy()
 
-        # Coerce created_dt to date
-        if "created_dt" in df.columns:
-            df["date"] = pd.to_datetime(df["created_dt"], errors="coerce", utc=True).dt.date
-        else:
-            df["date"] = datetime.now(timezone.utc).date()
-
-        df["date"] = df["date"].fillna(datetime.now(timezone.utc).date())
-
-        affected_dates = sorted({str(date) for date in df["date"].dropna().unique()})
-
-        with self._conn() as conn:
-            if replace_affected_dates and affected_dates:
-                placeholders = ",".join("?" for _ in affected_dates)
-                conn.execute(f"DELETE FROM daily_index WHERE date IN ({placeholders})", affected_dates)
-                conn.execute(f"DELETE FROM domain_scores WHERE date IN ({placeholders})", affected_dates)
-                conn.execute(f"DELETE FROM composite_index WHERE date IN ({placeholders})", affected_dates)
-
-            # Per-source-category daily aggregates
-            grp = df.groupby(["date", "source", "category"])
-            for (date, source, category), group in grp:
-                scores = group["aliveness_score"].dropna()
-                if scores.empty:
-                    continue
-                conn.execute(
-                    """INSERT INTO daily_index VALUES (?,?,?,?,?,?,?,?,?,?)
-                       ON CONFLICT(date, source, category) DO UPDATE SET
-                           n_docs          = excluded.n_docs,
-                           mean_score      = excluded.mean_score,
-                           median_score    = excluded.median_score,
-                           std_score       = excluded.std_score,
-                           pct_below_50    = excluded.pct_below_50,
-                           bot_fraction    = excluded.bot_fraction,
-                           aliveness_index = excluded.aliveness_index""",
-                    (
-                        str(date), source, category,
-                        len(group),
-                        round(float(scores.mean()), 3),
-                        round(float(scores.median()), 3),
-                        round(float(scores.std()), 3),
-                        round(float((scores < 50).mean() * 100), 2),
-                        0.0,   # bot_fraction placeholder
-                        round(float(scores.mean()), 3),   # = aliveness_index
-                    )
-                )
-
-            # Domain-level scores
-            if "domain" in df.columns:
-                dgrp = df.groupby(["date", "domain"])
-                for (date, domain), group in dgrp:
-                    scores = group["aliveness_score"].dropna()
-                    if scores.empty:
-                        continue
-                    cat = group["category"].iloc[0] if "category" in group.columns else ""
-                    conn.execute(
-                        """INSERT INTO domain_scores VALUES (?,?,?,?,?)
-                           ON CONFLICT(date, domain) DO UPDATE SET
-                               category   = excluded.category,
-                               mean_score = excluded.mean_score,
-                               n_docs     = excluded.n_docs""",
-                        (str(date), domain, cat,
-                         round(float(scores.mean()), 3), len(group))
-                    )
-
-        # Recompute composite index
-        self._recompute_composite()
-        print(f"[INDEX] Ingested {len(df):,} docs, updated composite index")
+    def ingest_scored_df(self, df: pd.DataFrame, replace_affected_dates: bool = False):
+        """Replace supplied source/category groups (or entire affected dates)."""
+        self._ingest(df, delta=False, replace_dates=replace_affected_dates)
 
     def ingest_scored_delta(self, df: pd.DataFrame):
+        """Insert unseen IDs; merge legacy summaries approximately, others exactly."""
+        self._ingest(df, delta=True)
+
+    def _ingest(self, df, *, delta, replace_dates=False):
         if df.empty or "aliveness_score" not in df.columns:
-            print("[INDEX] Nothing to ingest — empty or missing aliveness_score")
             return
-
-        df = df.copy()
-        if "created_dt" in df.columns:
-            df["date"] = pd.to_datetime(df["created_dt"], errors="coerce", utc=True).dt.date
-        else:
-            df["date"] = datetime.now(timezone.utc).date()
-        df["date"] = df["date"].fillna(datetime.now(timezone.utc).date())
-
+        df = self._valid_dated_docs(df)
+        if df.empty:
+            return
+        if "doc_id" not in df or df["doc_id"].isna().any() or df["doc_id"].eq("").any():
+            raise ValueError("Scored documents require nonempty doc_id for idempotent ingestion")
+        df = df.drop_duplicates("doc_id")
+        groups = list(df.groupby(["date", "source", "category"]).groups)
         with self._conn() as conn:
-            for (date, source, category), group in df.groupby(["date", "source", "category"]):
-                scores = group["aliveness_score"].dropna()
-                if scores.empty:
+            affected = set()
+            domains = set()
+            legacy = {}
+            inserted_scores = {}
+            if delta:
+                for key in groups:
+                    old = conn.execute(
+                        "SELECT * FROM daily_index WHERE date=? AND source=? AND category=?", key
+                    ).fetchone()
+                    ledger_count = conn.execute(
+                        "SELECT COUNT(*) FROM ingested_docs WHERE date=? AND source=? AND category=?", key
+                    ).fetchone()[0]
+                    # A count gap also preserves legacy history on subsequent deltas.
+                    if old is not None and (ledger_count == 0 or old["n_docs"] > ledger_count):
+                        legacy[key] = old
+            if not delta:
+                if replace_dates:
+                    for date in df["date"].unique():
+                        for table in ("ingested_docs", "daily_index", "domain_scores", "composite_index"):
+                            conn.execute(f"DELETE FROM {table} WHERE date = ?", (date,))
+                else:
+                    for key in groups:
+                        domains.update((key[0], row[0]) for row in conn.execute(
+                            "SELECT DISTINCT domain FROM ingested_docs WHERE date=? AND source=? AND category=? AND domain IS NOT NULL", key))
+                        conn.execute("DELETE FROM ingested_docs WHERE date=? AND source=? AND category=?", key)
+                        conn.execute("DELETE FROM daily_index WHERE date=? AND source=? AND category=?", key)
+            for row in df.to_dict("records"):
+                key = (row["date"], row["source"], row["category"])
+                domain = row.get("domain")
+                if pd.isna(domain):
+                    domain = None
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO ingested_docs VALUES (?,?,?,?,?,?)",
+                    (str(row["doc_id"]), *key, float(row["aliveness_score"]), domain))
+                if cursor.rowcount:
+                    affected.add(key)
+                    inserted_scores.setdefault(key, []).append(float(row["aliveness_score"]))
+                    if domain:
+                        domains.add((row["date"], domain))
+            for key in affected:
+                if key in legacy:
+                    old = legacy[key]
+                    scores = pd.Series(inserted_scores[key])
+                    n_old, n_delta = old["n_docs"], len(scores)
+                    n_docs = n_old + n_delta
+                    delta_mean = float(scores.mean())
+                    mean_raw = (n_old * old["mean_score"] + n_delta * delta_mean) / n_docs
+                    median = (n_old * old["median_score"] + n_delta * float(scores.median())) / n_docs
+                    pct = (n_old * old["pct_below_50"] + n_delta * float((scores < 50).mean() * 100)) / n_docs
+                    # Pool sample variances, including the between-group mean shift.
+                    m2 = (max(n_old - 1, 0) * (old["std_score"] or 0.0) ** 2
+                          + float(((scores - delta_mean) ** 2).sum())
+                          + (old["mean_score"] - delta_mean) ** 2 * n_old * n_delta / n_docs)
+                    std = (m2 / (n_docs - 1)) ** 0.5 if n_docs > 1 else None
+                else:
+                    scores = pd.Series([r[0] for r in conn.execute(
+                        "SELECT aliveness_score FROM ingested_docs WHERE date=? AND source=? AND category=?", key)])
+                    n_docs = len(scores)
+                    mean_raw = float(scores.mean())
+                    median = float(scores.median())
+                    std = float(scores.std()) if n_docs > 1 else None
+                    pct = float((scores < 50).mean() * 100)
+                mean = round(mean_raw, 3)
+                conn.execute("INSERT OR REPLACE INTO daily_index VALUES (?,?,?,?,?,?,?,?,?,?)",
+                             (*key, n_docs, mean, round(median, 3),
+                              round(std, 3) if std is not None else None,
+                              round(pct, 2), 0.0, mean))
+            for date, domain in domains:
+                rows = conn.execute("SELECT aliveness_score, category FROM ingested_docs WHERE date=? AND domain=?",
+                                    (date, domain)).fetchall()
+                if not rows:
+                    conn.execute("DELETE FROM domain_scores WHERE date=? AND domain=?", (date, domain))
                     continue
-                values = (
-                    str(date), source, category, len(group),
-                    round(float(scores.mean()), 3),
-                    round(float(scores.median()), 3),
-                    round(float(scores.std()), 3),
-                    round(float((scores < 50).mean() * 100), 2),
-                    0.0,
-                    round(float(scores.mean()), 3),
-                )
-                conn.execute(
-                    """INSERT INTO daily_index VALUES (?,?,?,?,?,?,?,?,?,?)
-                       ON CONFLICT(date, source, category) DO UPDATE SET
-                           mean_score = (
-                               daily_index.mean_score * daily_index.n_docs
-                               + excluded.mean_score * excluded.n_docs
-                           ) / (daily_index.n_docs + excluded.n_docs),
-                           median_score = excluded.median_score,
-                           std_score = excluded.std_score,
-                           pct_below_50 = (
-                               daily_index.pct_below_50 * daily_index.n_docs
-                               + excluded.pct_below_50 * excluded.n_docs
-                           ) / (daily_index.n_docs + excluded.n_docs),
-                           bot_fraction = (
-                               daily_index.bot_fraction * daily_index.n_docs
-                               + excluded.bot_fraction * excluded.n_docs
-                           ) / (daily_index.n_docs + excluded.n_docs),
-                           aliveness_index = (
-                               daily_index.aliveness_index * daily_index.n_docs
-                               + excluded.aliveness_index * excluded.n_docs
-                           ) / (daily_index.n_docs + excluded.n_docs),
-                           n_docs = daily_index.n_docs + excluded.n_docs""",
-                    values,
-                )
-
-            if "domain" in df.columns:
-                for (date, domain), group in df.groupby(["date", "domain"]):
-                    scores = group["aliveness_score"].dropna()
-                    if scores.empty:
-                        continue
-                    category = group["category"].iloc[0] if "category" in group.columns else ""
-                    conn.execute(
-                        """INSERT INTO domain_scores VALUES (?,?,?,?,?)
-                           ON CONFLICT(date, domain) DO UPDATE SET
-                               mean_score = (
-                                   domain_scores.mean_score * domain_scores.n_docs
-                                   + excluded.mean_score * excluded.n_docs
-                               ) / (domain_scores.n_docs + excluded.n_docs),
-                               n_docs = domain_scores.n_docs + excluded.n_docs,
-                               category = excluded.category""",
-                        (str(date), domain, category, round(float(scores.mean()), 3), len(group)),
-                    )
-
+                conn.execute("INSERT OR REPLACE INTO domain_scores VALUES (?,?,?,?,?)",
+                             (date, domain, rows[0][1], round(float(np.mean([r[0] for r in rows])), 3), len(rows)))
+        legacy_count = len(affected.intersection(legacy))
+        if legacy_count:
+            logging.getLogger(__name__).warning(
+                "[INDEX] Merged %d legacy daily groups approximately", legacy_count)
         self._recompute_composite()
-        print(f"[INDEX] Merged {len(df):,} docs into the composite index")
 
     def _recompute_composite(self):
         """Recompute the composite daily index from daily_index table."""
@@ -379,12 +344,12 @@ class AlivenessIndexEngine:
             rows = conn.execute(query, params).fetchall()
         return pd.DataFrame([dict(r) for r in rows])
 
-    def get_current_score(self) -> float:
+    def get_current_score(self) -> Optional[float]:
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT smoothed_index FROM composite_index ORDER BY date DESC LIMIT 1"
             ).fetchone()
-        return float(row["smoothed_index"]) if row else self.config["app"]["current_aliveness"]
+        return float(row["smoothed_index"]) if row else None
 
     def get_total_docs(self) -> int:
         with self._conn() as conn:
@@ -401,93 +366,3 @@ class AlivenessIndexEngine:
     def set_meta(self, key: str, value: str):
         with self._conn() as conn:
             conn.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, value))
-
-
-# ── Demo data seeder (for Streamlit demo mode) ────────────────────────────────
-
-def seed_demo_data(db_path: str = "./data/observatory.db", config_path: str = "config/config.yaml"):
-    """
-    Generate two years of synthetic daily IAI data for demo mode.
-    Simulates a realistic decline curve from ~78 in Jan 2024 to ~41 in May 2026.
-    """
-    print("[DEMO] Seeding synthetic historical index data …")
-    engine = AlivenessIndexEngine(config_path)
-
-    rng = np.random.default_rng(42)
-
-    # Build date range
-    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    end   = datetime(2026, 5, 3, tzinfo=timezone.utc)
-    n_days = (end - start).days + 1
-    dates = [start + timedelta(days=i) for i in range(n_days)]
-
-    # Sigmoid-ish decay from 78 → 41 with noise
-    x = np.linspace(0, 1, n_days)
-    trend = 78.0 - 37.0 * (1 / (1 + np.exp(-8 * (x - 0.55))))
-    noise = rng.normal(0, 1.5, n_days)
-    # Periodic weekly cycles (humans post less on weekends → slightly higher on weekdays)
-    weekly = 1.5 * np.sin(2 * np.pi * np.arange(n_days) / 7)
-    base_scores = trend + noise + weekly
-
-    # Add a few notable events (anomaly spikes / drops)
-    events = {
-        180: ("GPT-4o release surge", -8),
-        320: ("Llama 3 flood", -6),
-        450: ("Reddit API lockout (recovery)", +5),
-        550: ("Election bot storm", -10),
-        700: ("News AI disclaimer push", +3),
-    }
-
-    sources = ["common_crawl", "reddit", "news", "wikipedia"]
-    categories = ["web", "social", "news", "wiki"]
-    source_offsets = {"common_crawl": -2, "reddit": 0, "news": +2, "wikipedia": +4}
-
-    with engine._conn() as conn:
-        for i, date in enumerate(dates):
-            # Apply event effects
-            event_delta = 0
-            for day_offset, (reason, delta) in events.items():
-                if abs(i - day_offset) < 7:
-                    event_delta += delta * max(0, 1 - abs(i - day_offset) / 7)
-
-            composite = float(np.clip(base_scores[i] + event_delta, 10, 95))
-            smoothed = composite  # will be overwritten by _recompute_composite
-
-            date_str = date.strftime("%Y-%m-%d")
-
-            # Per-source rows
-            for src, cat in zip(sources, categories):
-                src_score = float(np.clip(
-                    composite + source_offsets[src] + rng.normal(0, 2),
-                    10, 95
-                ))
-                conn.execute(
-                    "INSERT OR REPLACE INTO daily_index VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (date_str, src, cat,
-                     int(rng.integers(500, 3000)),   # n_docs — must be plain int
-                     round(src_score, 3),
-                     round(src_score - float(rng.uniform(0, 3)), 3),
-                     round(float(rng.uniform(8, 20)), 3),
-                     round(float(rng.uniform(20, 60)), 2),
-                     round(float(rng.uniform(0.05, 0.4)), 4),
-                     round(src_score, 3),
-                     )
-                )
-
-        print(f"[DEMO] Inserted {n_days * len(sources):,} source-daily rows")
-
-    # Recompute composite (applies smoothing + anomaly detection properly)
-    engine._recompute_composite()
-
-    # Mark as demo seeded
-    engine.set_meta("demo_seeded", "true")
-    engine.set_meta("last_seeded_at", datetime.now(timezone.utc).isoformat())
-    print("[DEMO] ✓ Synthetic data ready")
-
-
-if __name__ == "__main__":
-    import sys
-    if "--seed-demo" in sys.argv:
-        seed_demo_data()
-    else:
-        print("Run with --seed-demo to populate the database with synthetic data")

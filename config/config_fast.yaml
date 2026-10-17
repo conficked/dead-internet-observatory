@@ -1,13 +1,9 @@
 analytics:
   anomaly_zscore_threshold: 2.5
-  historical_baseline_year: 2019
   index_smoothing_window: 7
   trend_min_data_points: 14
 app:
-  baseline_aliveness: 78.0
   cache_ttl_seconds: 3600
-  current_aliveness: 41.3
-  demo_mode: false
   refresh_hint_seconds: 300
 detection:
   max_text_length_for_features: 5000
@@ -21,7 +17,7 @@ detection:
     ttr: 0.18
     zipf_deviation: 0.1
 project:
-  description: Tracking the synthetic takeover of the public internet
+  description: Observational signals in sampled public web text
   name: Dead Internet Observatory
   version: 1.0.0
 sources:
