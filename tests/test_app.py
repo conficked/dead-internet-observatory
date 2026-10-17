@@ -214,3 +214,33 @@ class ResearchDisplayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_fixed_panel_composite_requires_every_source_and_minimum_n():
+    rows = [dict(source=source, week_start='2026-06-08', n=30, median=i * 10)
+            for i, source in enumerate(app.PANEL)]
+    complete = pd.DataFrame(rows)
+    assert app.compute_composite(complete).iloc[0]['median'] == 30
+    assert app.compute_composite(complete.iloc[:-1]).empty
+    complete.loc[0, 'n'] = 29
+    assert app.compute_composite(complete).empty
+
+
+def test_month_gap_split_uses_calendar_months():
+    frame = pd.DataFrame({'month': pd.to_datetime(['2024-01-01', '2024-02-01', '2024-04-01'])})
+    assert [len(run) for run in app.split_timeline_gaps(frame, 'month', monthly=True)] == [2, 1]
+
+
+def test_timeline_csv_loader_uses_local_files(tmp_path):
+    pd.DataFrame({'source': ['common_crawl'], 'month': ['2014-04-01'],
+                  'n': [100], 'median': [62], 'p25': [50], 'p75': [70]}).to_csv(tmp_path / 'monthly.csv', index=False)
+    result = app.load_timeline_csv('monthly', str(tmp_path))
+    assert result.iloc[0]['median'] == 62
+    assert result['month'].dt.year.tolist() == [2014]
+
+
+def test_common_crawl_caption_does_not_invent_an_unobserved_decline():
+    increasing = pd.DataFrame({'month': pd.to_datetime(['2014-01-01', '2018-01-01', '2020-01-01', '2024-01-01']),
+                               'median': [40, 50, 60, 70]})
+    assert 'gradual decline' not in app.common_crawl_caption(increasing)
+    assert 'predates' not in app.common_crawl_caption(increasing.iloc[-1:])

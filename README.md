@@ -1,10 +1,10 @@
 # Dead Internet Observatory
 
-**Tracking and quantifying the synthetic takeover of the public internet**
+**Observational signals in sampled public web text**
 
 The [Dead Internet Theory](https://en.wikipedia.org/wiki/Dead_Internet_theory) holds that the internet is increasingly populated by bots, AI-generated content, and automated engagement farms rather than real humans.
 
-This project is a living observatory that computes an **Internet Aliveness Index (IAI)** — a 0–100 score measuring how much of the sampled public internet still looks authentically human. Bots pull from 14 data sources, run a battery of statistical detection signals on every document, and aggregate everything into a daily index served through a Streamlit dashboard.
+This project computes an experimental **Internet Aliveness Index (IAI)** from linguistic signals in collected public web text. The 0–100 score is observational, not a calibrated AI probability or an estimate of the fraction of the internet that is synthetic. Coverage varies by source and collection date.
 
 No paid model APIs or subscriptions. Detection runs locally with classical NLP
 signals plus optional DistilGPT-2 perplexity scoring.
@@ -15,9 +15,10 @@ signals plus optional DistilGPT-2 perplexity scoring.
 
 > Live at: **[deadinternetobservatory.streamlit.app](https://deadinternetobservatory.streamlit.app/)**
 
-- IAI gauge with live score and delta vs. 2019 baseline
-- Platform health bars across all active sources
-- Methodology and signal weights
+- Current published score and individually dated source means from a SQLite snapshot
+- Common Crawl monthly medians and interquartile ranges for the observed 2014–2026 record
+- Per-platform weekly medians for 2026, plus a fixed equal-weight panel composite only when every panel source meets the minimum sample count
+- Methodology, coverage and limitations
 
 ---
 
@@ -25,21 +26,59 @@ signals plus optional DistilGPT-2 perplexity scoring.
 
 The IAI uses seven classical linguistic and behavioural signals:
 
-| Signal | Weight | What it's catching |
+| Signal | Weight | Feature interpretation |
 |---|---|---|
-| **Type-Token Ratio** | 18% | Narrow vocabulary is a classic AI tell |
-| **Shannon Entropy** | 15% | AI text has lower information density |
-| **Sentence Length Variance** | 15% | AI writes unnaturally uniform sentences |
-| **Bigram Repetition** | 15% | Stock phrase reuse, templated content |
-| **Temporal Burstiness** | 15% | Bots post on schedules; humans don't |
-| **MTLD** | 12% | Length-independent lexical diversity |
-| **Zipf Law Alignment** | 10% | Natural language follows a power law; AI text deviates |
+| **Type-Token Ratio** | 18% | Vocabulary diversity |
+| **Shannon Entropy** | 15% | Character distribution diversity |
+| **Sentence Length Variance** | 15% | Variation in sentence lengths |
+| **Bigram Repetition** | 15% | Repeated adjacent word pairs |
+| **Temporal Burstiness** | 15% | Timing variation (neutral when timestamps are absent) |
+| **MTLD** | 12% | Lexical diversity; length effects can remain |
+| **Zipf Law Alignment** | 10% | Fit to a ranked word-frequency distribution |
 
 All signals are statistical. No external model calls, no GPU required. Everything runs on standard CPU in Python.
 
-For non-Common-Crawl documents, the pipeline also runs DistilGPT-2 locally and
-assigns perplexity 15% of the score; the seven classical weights are scaled
-proportionally. Common Crawl disables perplexity to stay within workflow time limits.
+When enabled with `ENABLE_PERPLEXITY=1`, local DistilGPT-2 perplexity receives
+15% of the score and scales the classical weights proportionally. Common Crawl
+disables perplexity to limit runtime. Scoring modes and genre affect comparability.
+Short texts score lower; token thresholds reduce but do not remove length confounding.
+
+---
+
+## Local timeline aggregates
+
+```bash
+python -m pipeline.timeline_aggregates --input /path/to/scored.parquet --out data/timeline/
+```
+
+The builder projects seven metadata/score columns in PyArrow batches and never
+reads `text`. The small `monthly.csv`, `weekly.csv` and `meta.json` outputs are
+tracked in this repository and loaded locally by the dashboard. Rebuild them
+when the scored input changes; the current workflow does not commit them.
+
+Timelines keep the first occurrence per `(source, content_hash)`, falling back
+to `doc_id` for missing hashes or a degenerate 4chan hash shared by more than half
+of that source's rows. Common Crawl uses `created_dt` (WARC-Date), with an ISO
+`YYYY/WW` crawl-week fallback when absent; social sources use `created_dt`.
+Null, pre-2000 and future dates are dropped. Wikipedia, Wayback and GitHub are
+excluded. Monthly bins require ≥100 tokens per document and n≥50; 2026 weekly
+bins require ≥50 tokens and n≥30. Token thresholds can be changed with
+`--min-tokens` and `--min-tokens-monthly`.
+
+Charts show per-source medians and p25–p75 ranges, with gaps between unobserved
+periods. Common Crawl coverage is bursty, and its gradual decline predates the
+ChatGPT launch. It is one source. There is no pooled historical timeline because
+source composition changes. The weekly composite is the equal-weight mean of
+Hacker News, Mastodon, Steam, YouTube, Bluesky, 4chan and Reddit medians, shown
+only for weeks when all seven have n≥30. IQR bands describe score dispersion,
+not confidence intervals or calibrated authorship uncertainty.
+
+SQLite delta ingestion tracks document IDs and recomputes exact daily statistics.
+For an older aggregate-only database, deltas merge into existing daily summaries
+using document-weighted means, percentages and approximate medians, plus pooled
+variance, with a warning reporting the number of legacy groups merged. Delta
+document IDs are tracked to prevent re-ingestion from counting them twice; rebuild
+with `ingest_scored_df` when full historical documents are available for exact statistics.
 
 ---
 
@@ -47,7 +86,7 @@ proportionally. Common Crawl disables perplexity to stay within workflow time li
 
 ```
 +---------------------------------------------------------------------------+
-|                             DATA MINIONS (14 active)                      |
+|                             DATA COLLECTION MINIONS                      |
 |  Common Crawl · Reddit · News RSS · Wikipedia · HackerNews · Wayback      |
 |  Bluesky · 4chan · Steam · YouTube · LinkedIn · Stack Overflow             |
 |  Mastodon · GitHub Content                                                 |
@@ -226,7 +265,7 @@ Dependency files are split by runtime:
 
 ```
 dead-internet-observatory/
-├── minions/           # 14 data collection bots
+├── minions/           # data collection bots
 ├── pipeline/          # Bronze → Silver → Gold ETL + SQLite index
 ├── detection/         # Statistical AI-content detection engine
 ├── analytics/         # Aliveness Index computation + anomaly detection
