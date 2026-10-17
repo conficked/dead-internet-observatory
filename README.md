@@ -16,8 +16,8 @@ signals plus optional DistilGPT-2 perplexity scoring.
 > Live at: **[deadinternetobservatory.streamlit.app](https://deadinternetobservatory.streamlit.app/)**
 
 - Current published score and individually dated source means from a SQLite snapshot
-- Common Crawl monthly medians and interquartile ranges for the observed 2014–2026 record
-- Per-platform weekly medians for 2026, plus a fixed equal-weight panel composite only when every panel source meets the minimum sample count
+- Common Crawl per-crawl medians and bootstrap confidence intervals for the observed 2014–2026 record
+- Per-platform two-week medians for 2026, plus a fixed equal-weight panel composite only when every panel source meets the minimum sample count
 - Methodology, coverage and limitations
 
 ---
@@ -52,7 +52,7 @@ python -m pipeline.timeline_aggregates --input /path/to/scored.parquet --out dat
 ```
 
 The builder projects seven metadata/score columns in PyArrow batches and never
-reads `text`. The small `monthly.csv`, `weekly.csv` and `meta.json` outputs are
+reads `text`. The small `cc_crawls.csv`, `biweekly.csv` and `meta.json` outputs are
 tracked in this repository and loaded locally by the dashboard. Rebuild them
 when the scored input changes; the current workflow does not commit them.
 
@@ -61,18 +61,43 @@ to `doc_id` for missing hashes or a degenerate 4chan hash shared by more than ha
 of that source's rows. Common Crawl uses `created_dt` (WARC-Date), with an ISO
 `YYYY/WW` crawl-week fallback when absent; social sources use `created_dt`.
 Null, pre-2000 and future dates are dropped. Wikipedia, Wayback and GitHub are
-excluded. Monthly bins require ≥100 tokens per document and n≥50; 2026 weekly
-bins require ≥50 tokens and n≥30. Token thresholds can be changed with
-`--min-tokens` and `--min-tokens-monthly`.
+excluded. Each Common Crawl point groups one `crawl_partition` and is plotted at
+its median WARC date, requiring ≥100 tokens per document and n≥50. Lines and
+bands break only when consecutive crawl points are more than 120 days apart.
+The ChatGPT marker is 2022-11-30; the caption computes period summaries from the
+data and describes a pre-existing gradual decline only when those summaries support it.
 
-Charts show per-source medians and p25–p75 ranges, with gaps between unobserved
-periods. Common Crawl coverage is bursty, and its gradual decline predates the
-ChatGPT launch. It is one source. There is no pooled historical timeline because
-source composition changes. The weekly composite is the equal-weight mean of
-Hacker News, Mastodon, Steam, YouTube, Bluesky and 4chan medians, shown
-only for weeks when all six have n≥30. Reddit is excluded from the panel
-because it rarely reaches n≥30 eligible documents per week. IQR bands describe score dispersion,
-not confidence intervals or calibrated authorship uncertainty.
+The main band is a bootstrap 95% confidence interval of the median: 1000 resamples,
+fixed seed 0, with a deterministic subsample of at most 20000 documents per bin.
+The optional faint p25–p75 band describes document spread, distinct from uncertainty
+in the median. Neither interval calibrates AI authorship probabilities.
+
+The 2026 platform series excludes Common Crawl and uses 14-day bins aligned to
+Monday 2026-01-05, requiring ≥50 tokens and n≥100. A single selected platform
+shows its bootstrap CI. The composite is the equal-weight mean of Hacker News,
+Mastodon, Steam, YouTube, Bluesky and 4chan medians, shown only for bins when all
+six have n≥100. Missing panel sources are never reweighted. Reddit may be selected
+individually but is outside this fixed panel. Axes fit the displayed values with padding.
+Token thresholds can be changed with `--min-tokens` and `--min-tokens-crawl`.
+
+Common Crawl has an independent 50000-document pipeline quota and a 10000-row
+per-crawl cap counting existing gold rows, selected round-robin across crawls.
+Other sources retain the newest-first 6000-document quota. CC remains perplexity-free.
+The minion harvests up to five crawls per run, five WET files per crawl and 2000
+records per file, stopping at the remaining per-crawl quota. Failed files receive
+three retries with backoff, then replacement files. Attempts and successful segment
+counts are persisted in `config/cc_attempts.json`; a 12-hour cooldown allows the
+pipeline to publish confirmation. A crawl becomes done only when published gold
+rows reach 80% of target (a smaller target requires every available WET file to be
+exhausted without truncation or errors). Published counts live in SQLite table
+`cc_crawl_status` within `observatory.db`, uploaded by the existing publisher.
+The minion reads that public database from `conficked/dead-internet-observatory`
+with retry/backoff; fetch failures never confirm completion. Pipeline CI restores
+and publishes to the same dataset. No uploads are needed to rebuild local timelines.
+The scoped backfill removes exactly the 65 diagnosed done-but-empty IDs, leaving
+other done entries intact. Progress does not automatically reset:
+`sources.common_crawl.auto_reset_progress: false`; manual workflow dispatch offers
+`reset_progress` (default false). A completed or cooling-down queue exits cleanly.
 
 SQLite delta ingestion tracks document IDs and recomputes exact daily statistics.
 For an older aggregate-only database, deltas merge into existing daily summaries

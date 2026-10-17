@@ -1,6 +1,6 @@
 {
-  "build_time": "2026-10-17T20:34:55.466402+00:00",
-  "date_cutoff_utc": "2026-10-17T20:34:22.134348+00:00",
+  "build_time": "2026-10-17T21:39:14.962321+00:00",
+  "date_cutoff_utc": "2026-10-17T21:28:43.423452+00:00",
   "input_row_count": 3437213,
   "rows_dropped": {
     "excluded_source": 67228,
@@ -24,19 +24,24 @@
   "common_crawl_partition_fallback_rows": 0,
   "thresholds": {
     "min_tokens": 50,
-    "min_tokens_monthly": 100,
-    "min_n_monthly": 50,
-    "min_n_weekly": 30,
-    "weekly_year": 2026,
+    "min_tokens_crawl": 100,
+    "min_n_crawl": 50,
+    "min_n_biweekly": 100,
+    "biweekly_year": 2026,
+    "bin_days": 14,
+    "alignment_anchor": "2026-01-05",
+    "bootstrap_resamples": 1000,
+    "bootstrap_seed": 0,
+    "bootstrap_max_sample": 20000,
     "earliest_date": "2000-01-01"
   },
   "eligible_rows": {
-    "monthly": 1936392,
-    "weekly": 582651
+    "cc_crawls": 1852641,
+    "biweekly": 244983
   },
   "bins_dropped_below_min_n": {
-    "monthly": 174,
-    "weekly": 38
+    "cc_crawls": 0,
+    "biweekly": 25
   },
   "date_rules": "Common Crawl WARC created_dt, ISO crawl week fallback; social created_dt; future dates excluded",
   "excluded_sources": [

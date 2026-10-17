@@ -217,30 +217,30 @@ if __name__ == "__main__":
 
 
 def test_fixed_panel_composite_requires_every_source_and_minimum_n():
-    rows = [dict(source=source, week_start='2026-06-08', n=30, median=i * 10)
+    rows = [dict(source=source, period_start='2026-06-08', n=100, median=i * 10)
             for i, source in enumerate(app.PANEL)]
     complete = pd.DataFrame(rows)
     assert app.compute_composite(complete).iloc[0]['median'] == 10 * (len(app.PANEL) - 1) / 2
     assert app.compute_composite(complete.iloc[:-1]).empty
-    complete.loc[0, 'n'] = 29
+    complete.loc[0, 'n'] = 99
     assert app.compute_composite(complete).empty
 
 
-def test_month_gap_split_uses_calendar_months():
-    frame = pd.DataFrame({'month': pd.to_datetime(['2024-01-01', '2024-02-01', '2024-04-01'])})
-    assert [len(run) for run in app.split_timeline_gaps(frame, 'month', monthly=True)] == [2, 1]
+def test_crawl_gap_split_at_120_days():
+    frame = pd.DataFrame({'median_date': pd.to_datetime(['2024-01-01', '2024-04-30', '2024-08-30'])})
+    assert [len(run) for run in app.split_timeline_gaps(frame, 'median_date')] == [2, 1]
 
 
 def test_timeline_csv_loader_uses_local_files(tmp_path):
-    pd.DataFrame({'source': ['common_crawl'], 'month': ['2014-04-01'],
-                  'n': [100], 'median': [62], 'p25': [50], 'p75': [70]}).to_csv(tmp_path / 'monthly.csv', index=False)
-    result = app.load_timeline_csv('monthly', str(tmp_path))
+    pd.DataFrame({'source': ['common_crawl'], 'median_date': ['2014-04-01'],
+                  'n': [100], 'median': [62], 'p25': [50], 'p75': [70]}).to_csv(tmp_path / 'cc_crawls.csv', index=False)
+    result = app.load_timeline_csv('cc_crawls', str(tmp_path))
     assert result.iloc[0]['median'] == 62
-    assert result['month'].dt.year.tolist() == [2014]
+    assert result['median_date'].dt.year.tolist() == [2014]
 
 
 def test_common_crawl_caption_does_not_invent_an_unobserved_decline():
-    increasing = pd.DataFrame({'month': pd.to_datetime(['2014-01-01', '2018-01-01', '2020-01-01', '2024-01-01']),
+    increasing = pd.DataFrame({'median_date': pd.to_datetime(['2014-01-01', '2018-01-01', '2020-01-01', '2024-01-01']),
                                'median': [40, 50, 60, 70]})
     assert 'gradual decline' not in app.common_crawl_caption(increasing)
     assert 'predates' not in app.common_crawl_caption(increasing.iloc[-1:])
@@ -259,3 +259,21 @@ def test_score_axis_fits_data_with_padding():
     chart = app.chart_source_medians(df, 'week_start')
     assert list(chart.layout.yaxis.range) == [52.0, 63.0]
     assert chart.layout.yaxis.title.text == 'Observational score · 0–100'
+
+
+def test_cc_excluded_from_platform_options():
+    assert app.platform_options(pd.DataFrame({'source': ['common_crawl', 'reddit']})) == ['reddit']
+
+
+def test_crawl_chart_ci_spread_and_gaps():
+    frame = pd.DataFrame({'source':['common_crawl']*3,
+        'median_date':pd.to_datetime(['2020-01-01','2020-04-30','2020-08-30']),
+        'n':[100]*3, 'median':[50]*3, 'ci_low':[49]*3, 'ci_high':[51]*3,
+        'p25':[20]*3, 'p75':[80]*3})
+    chart = app.chart_source_medians(frame, 'median_date', band=True)
+    assert len(chart.data) == 6
+    assert list(chart.layout.yaxis.range) == [46,54]
+    assert str(chart.layout.shapes[0].x0) == '2022-11-30'
+    chart = app.chart_source_medians(frame, 'median_date', band=True, spread=True)
+    assert len(chart.data) == 10
+    assert list(chart.layout.yaxis.range) == [17,83]

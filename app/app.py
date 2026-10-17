@@ -184,9 +184,9 @@ TIMELINE_DIR = ROOT / 'data' / 'timeline'
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
 def load_timeline_csv(kind: str, directory: str = str(TIMELINE_DIR)) -> pd.DataFrame:
-    if kind not in ('monthly', 'weekly'):
-        raise ValueError('Timeline kind must be monthly or weekly')
-    column = 'month' if kind == 'monthly' else 'week_start'
+    if kind not in ('cc_crawls', 'biweekly'):
+        raise ValueError('Timeline kind must be cc_crawls or biweekly')
+    column = 'median_date' if kind == 'cc_crawls' else 'period_start'
     return pd.read_csv(Path(directory) / f'{kind}.csv', parse_dates=[column])
 
 
@@ -195,46 +195,51 @@ def compute_composite(weekly_df: pd.DataFrame) -> pd.DataFrame:
 
     Platform selection never changes the panel or its weights.
     """
-    columns = ['week_start', 'median']
+    columns = ['period_start', 'median']
     if weekly_df.empty:
         return pd.DataFrame(columns=columns)
     panel = weekly_df.loc[weekly_df['source'].isin(PANEL)].copy()
     rows = []
-    for week, group in panel.groupby('week_start'):
+    for week, group in panel.groupby('period_start'):
         if (len(group) == len(PANEL) and set(group['source']) == set(PANEL)
-                and group['n'].ge(30).all() and group['median'].notna().all()):
-            rows.append({'week_start': week, 'median': group['median'].mean()})
-    return pd.DataFrame(rows, columns=columns).sort_values('week_start').reset_index(drop=True)
+                and group['n'].ge(100).all() and group['median'].notna().all()):
+            rows.append({'period_start': week, 'median': group['median'].mean()})
+    return pd.DataFrame(rows, columns=columns).sort_values('period_start').reset_index(drop=True)
 
 
-def split_timeline_gaps(df: pd.DataFrame, date_column: str, *, monthly=False) -> list:
-    """Return separate observed runs; calendar months have unequal lengths."""
+def platform_options(frame):
+    return sorted(set(frame['source']) - {'common_crawl'})
+
+
+def split_timeline_gaps(df: pd.DataFrame, date_column: str) -> list:
     ordered = df.sort_values(date_column).copy()
     dates = pd.to_datetime(ordered[date_column])
-    gaps = ((dates.dt.year * 12 + dates.dt.month).diff().gt(1) if monthly
-            else dates.diff().dt.days.gt(7))
+    gaps = dates.diff().dt.days.gt(120 if date_column == 'median_date' else 14)
     return [group for _, group in ordered.groupby(gaps.cumsum())]
 
 
 def score_axis_range(*frames, columns=('median', 'p25', 'p75'), pad=3.0):
     """Fit the score axis to plotted values with padding, clamped to 0–100."""
-    values = pd.concat([f[c] for f in frames if f is not None and not f.empty
-                        for c in columns if c in f.columns], ignore_index=True).dropna()
+    parts = [f[c] for f in frames if f is not None and not f.empty for c in columns if c in f.columns]
+    values = pd.concat(parts, ignore_index=True).dropna() if parts else pd.Series(dtype=float)
     if values.empty:
         return [45.0, 70.0]
     return [max(0.0, float(values.min()) - pad), min(100.0, float(values.max()) + pad)]
 
 
-def chart_source_medians(df, date_column, *, band=False, monthly=False, composite=None):
+def chart_source_medians(df, date_column, *, band=False, spread=False, composite=None):
     fig = go.Figure()
     colors = ['#24649a', '#9d4a36', '#38836a', '#81679c', '#b08025', '#527c89', '#a95177', '#646464', '#758d35', '#c07142']
     for color, (source, observations) in zip(colors, df.groupby('source', sort=True)):
-        for i, run in enumerate(split_timeline_gaps(observations, date_column, monthly=monthly)):
-            if band:
-                fig.add_trace(go.Scatter(x=run[date_column], y=run['p25'], mode='lines',
+        for i, run in enumerate(split_timeline_gaps(observations, date_column)):
+            bands = [('ci_low', 'ci_high', .18)] if band else []
+            if spread:
+                bands.insert(0, ('p25', 'p75', .07))
+            for lower, upper, opacity in bands:
+                fig.add_trace(go.Scatter(x=run[date_column], y=run[lower], mode='lines',
                                          line=dict(width=0), showlegend=False, hoverinfo='skip', connectgaps=False))
-                fig.add_trace(go.Scatter(x=run[date_column], y=run['p75'], mode='lines',
-                                         line=dict(width=0), fill='tonexty', fillcolor='rgba(36,100,154,0.16)',
+                fig.add_trace(go.Scatter(x=run[date_column], y=run[upper], mode='lines',
+                                         line=dict(width=0), fill='tonexty', fillcolor=f'rgba(36,100,154,{opacity})',
                                          showlegend=False, hoverinfo='skip', connectgaps=False))
             fig.add_trace(go.Scatter(
                 x=run[date_column], y=run['median'], mode='lines+markers',
@@ -244,26 +249,26 @@ def chart_source_medians(df, date_column, *, band=False, monthly=False, composit
                 hovertemplate='%{x|%d %b %Y}<br>Median: %{y:.1f}<br>Documents: %{customdata[0]:,.0f}'
                               '<br>IQR: %{customdata[1]:.1f}–%{customdata[2]:.1f}<extra>%{fullData.name}</extra>'))
     if composite is not None and not composite.empty:
-        for i, run in enumerate(split_timeline_gaps(composite, 'week_start')):
-            fig.add_trace(go.Scatter(x=run['week_start'], y=run['median'], mode='lines+markers',
+        for i, run in enumerate(split_timeline_gaps(composite, 'period_start')):
+            fig.add_trace(go.Scatter(x=run['period_start'], y=run['median'], mode='lines+markers',
                                      name='Fixed panel composite', showlegend=i == 0, legendgroup='composite',
                                      line=dict(color='#202e3d', width=4, dash='dash'), connectgaps=False))
-    if monthly:
+    if date_column == 'median_date':
         fig.add_shape(type='line', x0='2022-11-30', x1='2022-11-30', y0=0, y1=1,
                       yref='paper', line=dict(dash='dash', color=P['rust']))
         fig.add_annotation(x='2022-11-30', y=1, yref='paper', text='ChatGPT launch',
                            showarrow=False, yshift=12)
     fig.update_layout(**PLOTLY_BASE, height=440, margin=dict(l=20, r=20, t=70, b=30),
                       yaxis=dict(title='Observational score · 0–100', gridcolor=P['rule'],
-                                 range=score_axis_range(df, composite, columns=('median', 'p25', 'p75') if band else ('median',))),
-                      xaxis=dict(title='Month' if monthly else 'Week starting Monday', showgrid=False),
+                                 range=score_axis_range(df, composite, columns=('median',) + (('ci_low', 'ci_high') if band else ()) + (('p25', 'p75') if spread else ()))),
+                      xaxis=dict(title='Median WARC date per crawl' if date_column == 'median_date' else 'Two-week period starting Monday', showgrid=False),
                       legend=dict(orientation='h', y=1.15), hovermode='closest')
     return fig
 
 
 def common_crawl_caption(monthly):
-    """Describe observed monthly medians, without inventing annual coverage."""
-    years = monthly['month'].dt.year
+    """Describe observed crawl medians, without inventing annual coverage."""
+    years = monthly['median_date'].dt.year
     periods = [('2014', years.eq(2014)), ('2017–19', years.between(2017, 2019)),
                ('2020', years.eq(2020)), ('since 2023', years.ge(2023))]
     summaries = [monthly.loc[mask, 'median'].median() for _, mask in periods]
@@ -273,10 +278,10 @@ def common_crawl_caption(monthly):
                  and all(a > b for a, b in zip(summaries, summaries[1:]))
                  else 'This record describes one source; period coverage and scores may vary. ')
     return (narrative +
-            'Median of observed monthly medians (' + '; '.join(values) + '). '
-            'Common Crawl months are bursty; gaps are unobserved, and lines and IQR bands break across them. '
+            'Median of observed crawl medians (' + '; '.join(values) + '). '
+            'Each point represents one crawl at its median WARC date; lines and bands break across gaps over 120 days. '
             'Documents have at least 100 tokens and are deduplicated within source. '
-            'Monthly bins require at least 50 documents; the band shows p25–p75, not a confidence interval.')
+            'Crawls require at least 50 documents. The main band is a bootstrap 95% confidence interval of the median (1000 resamples, fixed seed, at most 20000 sampled documents); optional faint p25–p75 bands show document spread.')
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
@@ -519,40 +524,39 @@ def main():
 
     section("Long-term record: Common Crawl")
     try:
-        monthly = load_timeline_csv("monthly")
-        common_crawl = monthly.loc[monthly["source"].eq("common_crawl")
-                                   & monthly["month"].dt.year.between(2014, 2026)]
+        common_crawl = load_timeline_csv("cc_crawls")
         if common_crawl.empty:
-            st.info("No Common Crawl months meet the timeline sample threshold.")
+            st.info("No Common Crawl crawls meet the timeline sample threshold.")
         else:
-            st.plotly_chart(chart_source_medians(common_crawl, "month", band=True, monthly=True),
+            spread = st.toggle("Show spread (25th–75th percentile)", value=False)
+            st.plotly_chart(chart_source_medians(common_crawl.assign(source='common_crawl'), "median_date", band=True, spread=spread),
                             width="stretch", config={"displaylogo": False})
             st.caption(common_crawl_caption(common_crawl))
     except Exception as exc:
-        st.warning(f"Repository-local monthly timeline unavailable: {exc}")
+        st.warning(f"Repository-local crawl timeline unavailable: {exc}")
 
-    section("Dead Internet Index (weekly, 2026)")
+    section("Dead Internet Index (two-week bins, 2026)")
     try:
-        weekly = load_timeline_csv("weekly")
-        platforms = sorted(weekly["source"].unique())
+        biweekly = load_timeline_csv("biweekly")
+        platforms = platform_options(biweekly)
         selected = st.multiselect("Platforms", platforms, default=platforms)
-        composite = compute_composite(weekly)
-        shown = weekly.loc[weekly["source"].isin(selected)]
+        composite = compute_composite(biweekly)
+        shown = biweekly.loc[biweekly["source"].isin(selected)]
         if composite.empty:
-            st.info("The fixed panel composite is unavailable: no week has at least 30 eligible "
+            st.info("The fixed panel composite is unavailable: no two-week bin has at least 100 eligible "
                     "documents in every panel source (Hacker News, Mastodon, Steam, YouTube, "
                     "Bluesky and 4chan). Missing platforms are never reweighted.")
         if not shown.empty or not composite.empty:
-            st.plotly_chart(chart_source_medians(shown, "week_start", band=len(selected) == 1,
+            st.plotly_chart(chart_source_medians(shown, "period_start", band=len(selected) == 1,
                                                 composite=composite),
                             width="stretch", config={"displaylogo": False})
-        st.caption("Per-platform weekly medians; at least 50 tokens per document and 30 documents per bin. "
-                   "The IQR band appears for a single selected platform. The composite is the equal-weight "
-                   "mean of the six fixed panel medians, shown only for complete weeks. "
-                   "Selecting platforms does not change the composite. Lines break across missing weeks. "
-                   "Timelines come from repository-local data/timeline CSVs.")
+        st.caption("Per-platform two-week medians for 2026; at least 50 tokens per document and 100 documents per bin. "
+                   "Common Crawl is excluded. Bins are aligned to Monday 2026-01-05. A bootstrap 95% CI "
+                   "appears for one selected platform. The composite is the equal-weight mean of the six "
+                   "fixed panel medians, shown only for complete bins. Selecting platforms does not change "
+                   "the composite. Lines break across missing bins. Timelines use repository-local CSVs.")
     except Exception as exc:
-        st.warning(f"Repository-local weekly timeline unavailable: {exc}")
+        st.warning(f"Repository-local biweekly timeline unavailable: {exc}")
 
     section("Across sources")
     st.write("Latest available daily mean document score for each source, weighted by document count "
@@ -573,16 +577,17 @@ def main():
     method, limits = st.columns(2, gap="large")
     with method:
         st.markdown("### From text to an index")
-        st.write("The timelines use per-source medians and interquartile ranges (p25–p75). "
+        st.write("The timelines use per-source medians with bootstrap 95% confidence intervals (1000 resamples, fixed seed, sample capped at 20000). Optional p25–p75 bands show spread. "
                  "Documents are deduplicated by (source, content_hash); missing hashes and degenerate "
-                 "4chan hashes fall back to doc_id. Weekly bins use documents with at least 50 tokens "
-                 "and require n ≥ 30; monthly bins use at least 100 tokens and require n ≥ 50. "
+                 "4chan hashes fall back to doc_id. Two-week bins exclude Common Crawl and use documents with at least 50 tokens "
+                 "and require n ≥ 100; per-crawl Common Crawl points use at least 100 tokens and require n ≥ 50. "
                  "Common Crawl uses created_dt (WARC-Date), falling back to its ISO crawl week when absent. "
                  "Social sources use created_dt. Null, pre-2000 and future dates are excluded, as are "
-                 "Wikipedia, Wayback and GitHub. The weekly timeline covers 2026; the long-term chart "
+                 "Wikipedia, Wayback and GitHub. The two-week timeline covers 2026; the long-term chart "
                  "shows Common Crawl alone. There is no pooled cross-source historical timeline because "
-                 "the source mix changes. The weekly composite uses a fixed six-source equal-weight panel "
+                 "the source mix changes. The two-week composite uses a fixed six-source equal-weight panel "
                  "and requires every panel source to meet the sample threshold.")
+        st.write("CC harvests use a separate 50000-document pipeline quota and a 10000-row per-crawl cap. Completion requires published gold confirmation at 80% of target; attempts wait 12 hours for confirmation. The backfill requeues exactly 65 empty crawls. Progress never resets automatically by default.")
         st.write("The current score and source summaries above retain the published SQLite daily means "
                  "and smoothed composite; they use different aggregation rules from these local timelines.")
         st.write("Seven classical signals form the default score. These are heuristic features rather than "
@@ -605,7 +610,7 @@ def main():
                     "change these signals in human and generated text alike. Short texts score lower, so length "
                     "confounding remains even after token thresholds. Scores are observational, not calibrated "
                     "AI probabilities. No calibrated error rates "
-                    "or uncertainty intervals are supplied by this dashboard.\n"
+                    "for AI authorship are supplied by this dashboard; bootstrap intervals describe sampling uncertainty in medians.\n"
                     "- **Historical samples differ.** Archive and crawl dates mix with recent platform "
                     "observations. Changing source composition and scoring modes limit comparisons over time.\n"
                     "- **Access gaps matter.** Twitter/X and Substack collectors are blocked; their absence "

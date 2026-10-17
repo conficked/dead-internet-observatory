@@ -55,7 +55,7 @@ jobs:
         run: |
           python3 scripts/push_to_hf.py \
             --restore \
-            --repo jupiternull/dead-internet-observatory
+            --repo conficked/dead-internet-observatory
 
       - name: Verify pipeline state
         id: pipeline_state
@@ -162,7 +162,7 @@ jobs:
       - name: Push datasets to Hugging Face
         if: ${{ steps.pipeline_state.outputs.ready == 'true' && steps.hf_token.outputs.present == 'true' }}
         run: |
-          python3 scripts/push_to_hf.py --repo jupiternull/dead-internet-observatory
+          python3 scripts/push_to_hf.py --repo conficked/dead-internet-observatory
         env:
           PYTHONPATH: ${{ github.workspace }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

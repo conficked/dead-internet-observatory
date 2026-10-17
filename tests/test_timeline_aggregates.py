@@ -26,18 +26,17 @@ def sample():
 
 def test_filters_dedup_fallback_and_exact_quantiles():
     from pipeline.timeline_aggregates import aggregate_timeline
-    monthly, weekly, meta = aggregate_timeline(sample(), now='2026-10-17', min_n_monthly=1, min_n_weekly=1)
+    monthly, weekly, meta = aggregate_timeline(sample(), now='2026-10-17', min_n_crawl=1, min_n_biweekly=1)
     month = monthly.set_index('source')
     week = weekly.set_index('source')
-    assert set(month.index) == {'reddit', 'fourchan', 'common_crawl'}
-    assert month.loc['reddit', 'n'] == 1
+    assert set(month.index) == {'common_crawl'}
     assert week.loc['reddit', 'n'] == 2
     assert week.loc['reddit', 'median'] == 30
     assert week.loc['reddit', 'p25'] == 20
     assert week.loc['reddit', 'p75'] == 40
-    assert month.loc['fourchan', 'n'] == 4
-    assert month.loc['fourchan', 'median'] == 30
-    assert week.loc['common_crawl', 'week_start'] == '2026-06-08'
+    assert week.loc['fourchan', 'n'] == 4
+    assert 'common_crawl' not in week.index
+    assert month.loc['common_crawl', 'crawl_id'] == '2026-24'
     assert meta['input_row_count'] == len(sample())
     assert meta['dedup']['duplicates_dropped'] == 2
     assert meta['rows_dropped']['null_date'] == 1
@@ -69,7 +68,7 @@ def test_parquet_build_reads_only_projected_columns_in_batches(tmp_path, monkeyp
     timeline.build_timeline(path, tmp_path / 'out', now='2026-10-17')
     assert calls
     assert (tmp_path / 'out' / 'meta.json').exists()
-    assert pd.read_csv(tmp_path / 'out' / 'weekly.csv').empty
+    assert pd.read_csv(tmp_path / 'out' / 'biweekly.csv').empty
 
 
 def test_empty_fourchan_hash_is_reported_as_degenerate():
@@ -88,7 +87,7 @@ def test_hash_majority_is_global_and_dedup_crosses_batch_boundaries(tmp_path):
     path = tmp_path / 'scored.parquet'
     df.to_parquet(path)
     monthly, weekly, meta = build_timeline(path, tmp_path / 'out', batch_size=2,
-                                           now='2026-10-17', min_n_weekly=1, min_n_monthly=1)
+                                           now='2026-10-17', min_n_biweekly=1, min_n_crawl=1)
     assert weekly.set_index('source').loc['fourchan', 'n'] == 4
     assert weekly.set_index('source').loc['reddit', 'n'] == 2
     assert meta['dedup']['duplicates_dropped'] == 2
@@ -99,7 +98,7 @@ def test_half_shared_fourchan_hash_is_not_degenerate():
     from pipeline.timeline_aggregates import aggregate_timeline
     df = sample().loc[lambda x: x.source.eq('fourchan')].iloc[:4].copy()
     df['content_hash'] = ['same', 'same', 'other', 'last']
-    _, weekly, meta = aggregate_timeline(df, now='2026-10-17', min_n_weekly=1)
+    _, weekly, meta = aggregate_timeline(df, now='2026-10-17', min_n_biweekly=1)
     assert weekly.iloc[0]['n'] == 3
     assert meta['dedup']['fourchan_degenerate_hashes'] == []
 
@@ -109,17 +108,30 @@ def test_iso_crawl_weeks_validate_week_53_and_year_boundary():
     df = pd.concat([sample().loc[lambda x: x.source.eq('common_crawl')]] * 3, ignore_index=True)
     df['doc_id'] = ['a', 'b', 'c']
     df['crawl_partition'] = ['2020/53', '2021/53', '2026/01']
-    monthly, _, meta = aggregate_timeline(df, now='2026-10-17', min_n_monthly=1)
-    assert monthly['month'].tolist() == ['2020-12-01', '2025-12-01']
+    monthly, _, meta = aggregate_timeline(df, now='2026-10-17', min_n_crawl=1)
+    assert monthly['median_date'].tolist() == ['2020-12-28', '2025-12-29']
     assert meta['rows_dropped']['null_date'] == 1
 
 
 def test_sample_size_threshold_boundaries():
     from pipeline.timeline_aggregates import aggregate_timeline
-    df = pd.concat([sample().loc[lambda x: x.source.eq('reddit')].iloc[:1]] * 50, ignore_index=True)
+    df = pd.concat([sample().iloc[:1]] * 100, ignore_index=True)
     df['doc_id'] = df.index.astype(str)
     df['content_hash'] = df.index.astype(str)
-    assert aggregate_timeline(df.iloc[:29], now='2026-10-17')[1].empty
-    assert aggregate_timeline(df.iloc[:30], now='2026-10-17')[1].iloc[0]['n'] == 30
+    assert aggregate_timeline(df.iloc[:99], now='2026-10-17')[1].empty
+    assert aggregate_timeline(df, now='2026-10-17')[1].iloc[0]['n'] == 100
+    df['source'] = 'common_crawl'
     assert aggregate_timeline(df.iloc[:49], now='2026-10-17')[0].empty
-    assert aggregate_timeline(df, now='2026-10-17')[0].iloc[0]['n'] == 50
+    assert aggregate_timeline(df.iloc[:50], now='2026-10-17')[0].iloc[0]['n'] == 50
+
+
+def test_bootstrap_deterministic_and_alignment():
+    from pipeline.timeline_aggregates import bootstrap_ci, aggregate_timeline
+    assert bootstrap_ci(range(101)) == bootstrap_ci(range(101))
+    lo, hi = bootstrap_ci(range(101))
+    assert lo <= 50 <= hi
+    df = pd.concat([sample().iloc[:1]] * 4, ignore_index=True)
+    df['content_hash'] = df.index.astype(str)
+    df['created_dt'] = ['2026-01-05', '2026-01-18', '2026-01-19', '2026-01-04']
+    _, bins, _ = aggregate_timeline(df, now='2026-10-17', min_n_biweekly=1)
+    assert bins.set_index('period_start')['n'].to_dict() == {'2025-12-22': 1, '2026-01-05': 2, '2026-01-19': 1}

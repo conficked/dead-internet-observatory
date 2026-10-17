@@ -11,6 +11,13 @@ Free quota: CC data is 100% free via S3 (no egress from us-east-1)
 or via HTTPS. We use HTTPS for simplicity.
 """
 
+import json
+import os
+from pathlib import Path
+import sqlite3
+import tempfile
+import time
+
 import gzip
 import io
 import random
@@ -96,6 +103,7 @@ class CommonCrawlMinion(BaseMinion):
         except Exception as exc:
             self.logger.error(f"  Error streaming {wet_path}: {exc}")
             self.stats["errors"] += 1
+            raise
 
     def _parse_wet_block(self, block: str) -> Optional[Dict]:
         """Parse one WARC/WET block into a structured record."""
@@ -210,81 +218,98 @@ class CommonCrawlMinion(BaseMinion):
         from pathlib import Path
         Path(self.PROGRESS_FILE).write_text(json.dumps(sorted(done), indent=2))
 
+    ATTEMPTS_FILE = "config/cc_attempts.json"
+    STATUS_URL = "https://huggingface.co/datasets/conficked/dead-internet-observatory/resolve/main/observatory.db"
+
+    def _published_counts(self):
+        for attempt in range(3):
+            try:
+                response = requests.get(self.STATUS_URL, timeout=90)
+                response.raise_for_status()
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / 'status.db'
+                    path.write_bytes(response.content)
+                    with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as conn:
+                        return dict(conn.execute('SELECT crawl_id, gold_rows FROM cc_crawl_status'))
+            except Exception as exc:
+                self.logger.warning(f'Published CC status unavailable: {exc}')
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+        return None
+
     def run(self, dry_run: bool = False):
-        if not self.config["sources"]["common_crawl"].get("enabled", True):
-            self.logger.info("Common Crawl minion disabled — exiting")
+        cfg = self.config['sources']['common_crawl']
+        if not cfg.get('enabled', True):
             return
-
-        all_ids   = self._all_known_crawl_ids()
-        done      = self._load_progress()
+        all_ids = self._all_known_crawl_ids()
+        done = self._load_progress()
+        attempt_path = Path(self.ATTEMPTS_FILE)
+        attempts = json.loads(attempt_path.read_text()) if attempt_path.exists() else {}
+        if os.environ.get('CC_RESET_PROGRESS', '').lower() == 'true':
+            done, attempts = set(), {}
+        counts = self._published_counts()
+        target = cfg.get('max_rows_per_crawl', 10000)
+        if counts is not None:
+            for cid, rows in counts.items():
+                available = attempts.get(cid, {}).get('available_records', target)
+                if rows >= .8 * min(target, available) and min(target, available) > 0:
+                    done.add(cid)
         remaining = [cid for cid in all_ids if cid not in done]
-
-        if not remaining:
-            self.logger.info("[CC] All dates complete — resetting for next sampling pass.")
-            done = set()
-            self._save_progress(done)
+        if not remaining and cfg.get('auto_reset_progress', False):
+            done, attempts = set(), {}
             remaining = list(all_ids)
-
+        if not dry_run:
+            self._save_progress(done)
+        now = datetime.now(timezone.utc)
+        remaining = [cid for cid in remaining if cid not in attempts or
+                     (now - datetime.fromisoformat(attempts[cid]['last_attempt_iso'])).total_seconds() >= 12*3600]
         if not remaining:
-            self.logger.info("🤖 Common Crawl Minion — all known crawl dates processed")
+            self.logger.info('[CC] Nothing remains to harvest; awaiting published gold confirmation or new crawls.')
             return
-
-        # Process N dates per run — oldest unprocessed first
-        max_per_run = self.config["sources"]["common_crawl"].get("max_dates_per_run", 5)
-        batch_ids = remaining[:max_per_run]
-        self.logger.info(
-            f"🤖 Common Crawl Minion | processing {len(batch_ids)} dates | "
-            f"{len(done)}/{len(all_ids)} already done | queue: {batch_ids}"
-        )
-
-        for crawl_id in batch_ids:
-            self.logger.info(f"\n── Crawl: CC-MAIN-{crawl_id} ──────────────────")
-
-            all_paths = self.get_wet_paths(crawl_id)
-            if not all_paths:
+        for cid in remaining[:cfg.get('max_dates_per_run', 5)]:
+            paths = self.get_wet_paths(cid)
+            if not paths:
+                attempts[cid] = dict(last_attempt_iso=now.isoformat(), segments_ok=0, records=0)
                 if not dry_run:
-                    done.add(crawl_id)
-                    self._save_progress(done)
-                    self.stats["skipped"] += 1
-                    self.logger.warning(
-                        f"Skipping CC-MAIN-{crawl_id}; no WET paths available "
-                        f"({len(done)}/{len(all_ids)})"
-                    )
+                    attempt_path.write_text(json.dumps(attempts, indent=2) + "\n")
                 continue
-
-            sampled = random.sample(all_paths, min(self.max_segments, len(all_paths)))
-
-            for seg_idx, wet_path in enumerate(sampled, 1):
-                self.logger.info(f"  Segment {seg_idx}/{len(sampled)}")
-                batch: List[Dict] = []
-
-                for record in self.stream_wet_records(wet_path):
-                    batch.append(record)
-                    self.stats["fetched"] += 1
-
-                    if len(batch) >= 500:
-                        if not dry_run:
-                            partition = crawl_id.replace("-", "/")
-                            self.save_bronze(batch, "common_crawl", partition)
-                        self.stats["processed"] += len(batch)
-                        batch = []
-
+            records, segments_ok, exhausted_records = 0, 0, 0
+            all_untruncated = True
+            need = max(0, target - (counts or {}).get(cid, 0))
+            # Shuffle all paths so failed segments can be replaced without reuse.
+            for path in random.sample(paths, len(paths)):
+                if segments_ok >= self.max_segments or records >= need:
+                    break
+                batch = None
+                for retry in range(4):  # initial request plus three retries
+                    try:
+                        batch = list(self.stream_wet_records(path))
+                        break
+                    except Exception as exc:
+                        self.logger.warning(f'{cid}: segment failed ({retry+1}/4): {exc}')
+                        if retry < 3:
+                            time.sleep(2 ** retry)
+                if batch is None:
+                    continue
+                segments_ok += 1
+                all_untruncated = all_untruncated and len(batch) < self.max_per_wet
+                exhausted_records += len(batch)
+                batch = batch[:need-records]
+                records += len(batch)
+                self.stats['fetched'] += len(batch)
                 if batch and not dry_run:
-                    partition = crawl_id.replace("-", "/")
-                    self.save_bronze(batch, "common_crawl", partition)
-                    self.stats["processed"] += len(batch)
-
-                self.throttle(3.0)   # respectful delay between large files
-
-            # Mark this date done after each one (survives partial runs)
+                    self.save_bronze(batch, 'common_crawl', cid.replace('-', '/'))
+                    self.stats['processed'] += len(batch)
+                self.throttle(3.0)
+            attempt = dict(last_attempt_iso=now.isoformat(), segments_ok=segments_ok, records=records)
+            # A smaller target is valid only after exhausting every available file,
+            # with no failures or per-file truncation.
+            if segments_ok == len(paths) and all_untruncated:
+                attempt['available_records'] = exhausted_records
+            attempts[cid] = attempt
             if not dry_run:
-                done.add(crawl_id)
-                self._save_progress(done)
-                self.logger.info(f"✓ {crawl_id} complete ({len(done)}/{len(all_ids)})")
-
+                attempt_path.write_text(json.dumps(attempts, indent=2) + '\n')
         self.report_stats()
-        if not dry_run and self.stats["fetched"] == 0 and self.stats["skipped"] == 0:
-            raise RuntimeError("Common Crawl harvest produced zero records")
 
 
 if __name__ == "__main__":

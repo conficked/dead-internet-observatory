@@ -10,6 +10,10 @@ on:
     - cron: "0 22 * * *"   # 22:00 UTC
   workflow_dispatch:
     inputs:
+      reset_progress:
+        description: "Explicitly reset CC progress and attempt cooldowns"
+        type: boolean
+        default: false
       crawl_date:
         description: "CC crawl date (e.g. 2025-05)"
         required: false
@@ -17,7 +21,7 @@ on:
       max_segments:
         description: "Max segments to sample"
         required: false
-        default: "3"
+        default: "5"
 
 permissions:
   contents: write
@@ -78,6 +82,7 @@ jobs:
         run: python -m minions.common_crawl_bot
         env:
           PYTHONPATH: ${{ github.workspace }}
+          CC_RESET_PROGRESS: ${{ github.event.inputs.reset_progress || 'false' }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -85,13 +90,13 @@ jobs:
           name: commoncrawl-bronze-${{ github.run_id }}
           path: data/bronze/common_crawl/
           retention-days: 1
-          if-no-files-found: error
+          if-no-files-found: ignore
 
       - name: Commit data
         run: |
           git config user.name  "Common Crawl Bot"
           git config user.email "bot@dead-internet-observatory.noreply"
-          git add data/bronze/common_crawl/ config/cc_progress.json || true
+          git add data/bronze/common_crawl/ config/cc_progress.json config/cc_attempts.json || true
           git diff --cached --quiet || git commit -m "chore(data): CC harvest $(date -u +%Y-%m-%d)"
           git push || echo "Push skipped"
         continue-on-error: true

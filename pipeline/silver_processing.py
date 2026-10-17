@@ -15,10 +15,40 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import yaml
 
-from detection.ai_content_detector import score_dataframe, corpus_summary
 from analytics.aliveness_index import AlivenessIndexEngine
 
 MAX_NEW_DOCS = 6_000
+MAX_NEW_CC_DOCS = 50_000
+
+
+def cc_gold_counts(gold_path):
+    if not gold_path.exists():
+        return {}
+    frame = pd.read_parquet(gold_path, columns=['source', 'crawl_partition'])
+    counts = frame.loc[frame.source.eq('common_crawl'), 'crawl_partition'].dropna().str.replace('/', '-', regex=False).value_counts()
+    return {cid: int(n) for cid, n in counts.items()}
+
+
+def persist_cc_status(gold_path, conn):
+    from datetime import datetime, timezone
+    counts = cc_gold_counts(gold_path)
+    conn.execute('CREATE TABLE IF NOT EXISTS cc_crawl_status (crawl_id TEXT PRIMARY KEY, gold_rows INTEGER, updated_at TEXT)')
+    conn.execute('DELETE FROM cc_crawl_status')
+    conn.executemany('INSERT INTO cc_crawl_status VALUES (?, ?, ?)',
+                     [(cid, n, datetime.now(timezone.utc).isoformat()) for cid, n in counts.items()])
+
+
+def select_new_docs(frame, counts, *, max_cc=MAX_NEW_CC_DOCS, per_crawl=10000, max_other=MAX_NEW_DOCS):
+    cc_mask = frame['source'].eq('common_crawl')
+    other = frame.loc[~cc_mask]
+    if 'created_dt' in other:
+        other = other.sort_values('created_dt', ascending=False)
+    groups = []
+    for cid, group in frame.loc[cc_mask].groupby('crawl_partition', sort=True):
+        room = max(0, per_crawl - counts.get(str(cid).replace('/', '-'), 0))
+        groups.append(group.head(room).copy().assign(_round=range(min(len(group), room))))
+    cc = pd.concat(groups).sort_values('_round', kind='stable').head(max_cc).drop(columns='_round') if groups else frame.iloc[:0]
+    return pd.concat([cc, other.head(max_other)], ignore_index=True)
 
 
 def append_scored(gold_path, scored):
@@ -74,6 +104,8 @@ class SilverToGoldPipeline:
         self.engine = AlivenessIndexEngine(config_path)
 
     def run(self, source_file: str = "combined.parquet"):
+        from detection.ai_content_detector import score_dataframe, corpus_summary
+
         silver_path = self.silver_root / source_file
         if not silver_path.exists():
             print(f"[GOLD] Silver file not found: {silver_path}")
@@ -129,15 +161,14 @@ class SilverToGoldPipeline:
 
         if new_df.empty:
             print("[GOLD] Nothing new — index already up to date")
+            with self.engine._conn() as conn:
+                persist_cc_status(gold_path, conn)
             return
 
-        # Sort newest-first, then cap to stay within GH Actions timeout
-        if "created_dt" in new_df.columns:
-            new_df = new_df.sort_values("created_dt", ascending=False)
-
-        if len(new_df) > MAX_NEW_DOCS:
-            print(f"[GOLD] Capping to {MAX_NEW_DOCS:,} docs (was {len(new_df):,})")
-            new_df = new_df.head(MAX_NEW_DOCS).copy()
+        cc_config = self.config.get('sources', {}).get('common_crawl', {})
+        new_df = select_new_docs(new_df, cc_gold_counts(gold_path),
+                                 max_cc=cc_config.get('max_new_docs_per_run', MAX_NEW_CC_DOCS),
+                                 per_crawl=cc_config.get('max_rows_per_crawl', 10000))
 
         # Reload the durable IDs after scoring instead of retaining millions of
         # Python strings alongside the model and historical gold batches.
@@ -158,8 +189,10 @@ class SilverToGoldPipeline:
         if not cc_only.empty:
             print(f"[GOLD] Scoring {len(cc_only):,} CC docs (perplexity disabled)")
             os.environ["ENABLE_PERPLEXITY"] = ""
-            scored_parts.append(score_dataframe(cc_only))
-            os.environ["ENABLE_PERPLEXITY"] = orig_perplexity
+            try:
+                scored_parts.append(score_dataframe(cc_only))
+            finally:
+                os.environ["ENABLE_PERPLEXITY"] = orig_perplexity
 
         if not non_cc.empty:
             print(f"[GOLD] Scoring {len(non_cc):,} non-CC docs")
@@ -168,7 +201,9 @@ class SilverToGoldPipeline:
         scored = pd.concat(scored_parts, ignore_index=True) if scored_parts else pd.DataFrame()
 
         if scored.empty:
-            print("[GOLD] No scored output — nothing to persist")
+            print("[GOLD] No scored output — refreshing crawl status")
+            with self.engine._conn() as conn:
+                persist_cc_status(gold_path, conn)
             return
 
         summary = corpus_summary(scored)
@@ -194,6 +229,8 @@ class SilverToGoldPipeline:
                    ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
                 (str(len(registry_ids)),),
             )
+        with self.engine._conn() as conn:
+            persist_cc_status(gold_path, conn)
         print("[GOLD] ✓ SQLite index updated")
 
 
