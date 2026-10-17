@@ -220,7 +220,7 @@ def test_fixed_panel_composite_requires_every_source_and_minimum_n():
     rows = [dict(source=source, week_start='2026-06-08', n=30, median=i * 10)
             for i, source in enumerate(app.PANEL)]
     complete = pd.DataFrame(rows)
-    assert app.compute_composite(complete).iloc[0]['median'] == 30
+    assert app.compute_composite(complete).iloc[0]['median'] == 10 * (len(app.PANEL) - 1) / 2
     assert app.compute_composite(complete.iloc[:-1]).empty
     complete.loc[0, 'n'] = 29
     assert app.compute_composite(complete).empty
@@ -244,3 +244,18 @@ def test_common_crawl_caption_does_not_invent_an_unobserved_decline():
                                'median': [40, 50, 60, 70]})
     assert 'gradual decline' not in app.common_crawl_caption(increasing)
     assert 'predates' not in app.common_crawl_caption(increasing.iloc[-1:])
+
+
+def test_panel_excludes_reddit_and_has_six_sources():
+    assert 'reddit' not in app.PANEL
+    assert len(app.PANEL) == 6
+
+
+def test_score_axis_fits_data_with_padding():
+    df = pd.DataFrame({'source': ['a', 'a'], 'week_start': pd.to_datetime(['2026-06-01', '2026-06-08']),
+                       'n': [40, 40], 'median': [55.0, 60.0], 'p25': [50.0, 52.0], 'p75': [62.0, 66.0]})
+    assert app.score_axis_range(df, columns=('median',)) == [52.0, 63.0]
+    assert app.score_axis_range(df) == [47.0, 69.0]
+    chart = app.chart_source_medians(df, 'week_start')
+    assert list(chart.layout.yaxis.range) == [52.0, 63.0]
+    assert chart.layout.yaxis.title.text == 'Observational score · 0–100'

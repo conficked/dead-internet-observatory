@@ -69,8 +69,9 @@ Charts show per-source medians and p25–p75 ranges, with gaps between unobserve
 periods. Common Crawl coverage is bursty, and its gradual decline predates the
 ChatGPT launch. It is one source. There is no pooled historical timeline because
 source composition changes. The weekly composite is the equal-weight mean of
-Hacker News, Mastodon, Steam, YouTube, Bluesky, 4chan and Reddit medians, shown
-only for weeks when all seven have n≥30. IQR bands describe score dispersion,
+Hacker News, Mastodon, Steam, YouTube, Bluesky and 4chan medians, shown
+only for weeks when all six have n≥30. Reddit is excluded from the panel
+because it rarely reaches n≥30 eligible documents per week. IQR bands describe score dispersion,
 not confidence intervals or calibrated authorship uncertainty.
 
 SQLite delta ingestion tracks document IDs and recomputes exact daily statistics.

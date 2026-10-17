@@ -178,7 +178,7 @@ html { color-scheme: light; }
 """
 
 
-PANEL = ('hackernews', 'mastodon', 'steam', 'youtube', 'bluesky', 'fourchan', 'reddit')
+PANEL = ('hackernews', 'mastodon', 'steam', 'youtube', 'bluesky', 'fourchan')
 TIMELINE_DIR = ROOT / 'data' / 'timeline'
 
 
@@ -216,6 +216,15 @@ def split_timeline_gaps(df: pd.DataFrame, date_column: str, *, monthly=False) ->
     return [group for _, group in ordered.groupby(gaps.cumsum())]
 
 
+def score_axis_range(*frames, columns=('median', 'p25', 'p75'), pad=3.0):
+    """Fit the score axis to plotted values with padding, clamped to 0–100."""
+    values = pd.concat([f[c] for f in frames if f is not None and not f.empty
+                        for c in columns if c in f.columns], ignore_index=True).dropna()
+    if values.empty:
+        return [45.0, 70.0]
+    return [max(0.0, float(values.min()) - pad), min(100.0, float(values.max()) + pad)]
+
+
 def chart_source_medians(df, date_column, *, band=False, monthly=False, composite=None):
     fig = go.Figure()
     colors = ['#24649a', '#9d4a36', '#38836a', '#81679c', '#b08025', '#527c89', '#a95177', '#646464', '#758d35', '#c07142']
@@ -245,7 +254,8 @@ def chart_source_medians(df, date_column, *, band=False, monthly=False, composit
         fig.add_annotation(x='2022-11-30', y=1, yref='paper', text='ChatGPT launch',
                            showarrow=False, yshift=12)
     fig.update_layout(**PLOTLY_BASE, height=440, margin=dict(l=20, r=20, t=70, b=30),
-                      yaxis=dict(title='Observational score · 0–100', range=[0, 100], gridcolor=P['rule']),
+                      yaxis=dict(title='Observational score · 0–100', gridcolor=P['rule'],
+                                 range=score_axis_range(df, composite, columns=('median', 'p25', 'p75') if band else ('median',))),
                       xaxis=dict(title='Month' if monthly else 'Week starting Monday', showgrid=False),
                       legend=dict(orientation='h', y=1.15), hovermode='closest')
     return fig
@@ -531,14 +541,14 @@ def main():
         if composite.empty:
             st.info("The fixed panel composite is unavailable: no week has at least 30 eligible "
                     "documents in every panel source (Hacker News, Mastodon, Steam, YouTube, "
-                    "Bluesky, 4chan and Reddit). Missing platforms are never reweighted.")
+                    "Bluesky and 4chan). Missing platforms are never reweighted.")
         if not shown.empty or not composite.empty:
             st.plotly_chart(chart_source_medians(shown, "week_start", band=len(selected) == 1,
                                                 composite=composite),
                             width="stretch", config={"displaylogo": False})
         st.caption("Per-platform weekly medians; at least 50 tokens per document and 30 documents per bin. "
                    "The IQR band appears for a single selected platform. The composite is the equal-weight "
-                   "mean of the seven fixed panel medians, shown only for complete weeks. "
+                   "mean of the six fixed panel medians, shown only for complete weeks. "
                    "Selecting platforms does not change the composite. Lines break across missing weeks. "
                    "Timelines come from repository-local data/timeline CSVs.")
     except Exception as exc:
@@ -571,7 +581,7 @@ def main():
                  "Social sources use created_dt. Null, pre-2000 and future dates are excluded, as are "
                  "Wikipedia, Wayback and GitHub. The weekly timeline covers 2026; the long-term chart "
                  "shows Common Crawl alone. There is no pooled cross-source historical timeline because "
-                 "the source mix changes. The weekly composite uses a fixed seven-source equal-weight panel "
+                 "the source mix changes. The weekly composite uses a fixed six-source equal-weight panel "
                  "and requires every panel source to meet the sample threshold.")
         st.write("The current score and source summaries above retain the published SQLite daily means "
                  "and smoothed composite; they use different aggregation rules from these local timelines.")
