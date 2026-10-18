@@ -20,9 +20,9 @@
     "records": 10000
   },
   "2015-11": {
-    "last_attempt_iso": "2026-10-17T23:45:52.044366+00:00",
-    "segments_ok": 5,
-    "records": 8000
+    "last_attempt_iso": "2026-10-18T13:53:34.062146+00:00",
+    "segments_ok": 2,
+    "records": 2636
   },
   "2015-40": {
     "last_attempt_iso": "2026-10-18T06:50:19.295066+00:00",
@@ -71,6 +71,26 @@
   },
   "2019-47": {
     "last_attempt_iso": "2026-10-18T10:45:31.428306+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2020-10": {
+    "last_attempt_iso": "2026-10-18T13:53:34.062146+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2020-40": {
+    "last_attempt_iso": "2026-10-18T13:53:34.062146+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2021-04": {
+    "last_attempt_iso": "2026-10-18T13:53:34.062146+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2021-17": {
+    "last_attempt_iso": "2026-10-18T13:53:34.062146+00:00",
     "segments_ok": 5,
     "records": 10000
   }
