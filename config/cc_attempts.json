@@ -93,5 +93,30 @@
     "last_attempt_iso": "2026-10-18T13:53:34.062146+00:00",
     "segments_ok": 5,
     "records": 10000
+  },
+  "2021-31": {
+    "last_attempt_iso": "2026-10-18T17:02:40.988219+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2021-43": {
+    "last_attempt_iso": "2026-10-18T17:02:40.988219+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2022-05": {
+    "last_attempt_iso": "2026-10-18T17:02:40.988219+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2022-21": {
+    "last_attempt_iso": "2026-10-18T17:02:40.988219+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2022-33": {
+    "last_attempt_iso": "2026-10-18T17:02:40.988219+00:00",
+    "segments_ok": 5,
+    "records": 10000
   }
 }
