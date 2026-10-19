@@ -143,5 +143,30 @@
     "last_attempt_iso": "2026-10-18T20:26:08.187757+00:00",
     "segments_ok": 5,
     "records": 10000
+  },
+  "2024-33": {
+    "last_attempt_iso": "2026-10-19T07:09:15.965868+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2024-46": {
+    "last_attempt_iso": "2026-10-19T07:09:15.965868+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2026-08": {
+    "last_attempt_iso": "2026-10-19T07:09:15.965868+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2026-04": {
+    "last_attempt_iso": "2026-10-19T07:09:15.965868+00:00",
+    "segments_ok": 5,
+    "records": 10000
+  },
+  "2025-47": {
+    "last_attempt_iso": "2026-10-19T07:09:15.965868+00:00",
+    "segments_ok": 5,
+    "records": 10000
   }
 }
