@@ -1,0 +1,12 @@
+{"doc_id": "d1", "source": "reddit", "category": "social", "created_dt": "2026-01-01", "aliveness_score": 20, "scoring_version": "iai-v2-test", "domain": "a.example"}
+{"doc_id": "d2", "source": "reddit", "category": "social", "created_dt": "2026-01-01", "aliveness_score": 40, "scoring_version": "iai-v2-test", "domain": "b.example"}
+{"doc_id": "d3", "source": "news", "category": "news", "created_dt": "2026-01-01", "aliveness_score": 80, "scoring_version": "iai-v2-test", "domain": "c.example"}
+{"doc_id": "d4", "source": "news", "category": "news", "created_dt": "2026-01-01", "aliveness_score": 60, "scoring_version": "iai-v2-test", "domain": "d.example"}
+{"doc_id": "d5", "source": "reddit", "category": "social", "created_dt": "2026-01-02", "aliveness_score": 30, "scoring_version": "iai-v2-test", "domain": "a.example"}
+{"doc_id": "d6", "source": "reddit", "category": "social", "created_dt": "2026-01-02", "aliveness_score": 50, "scoring_version": "iai-v2-test", "domain": "b.example"}
+{"doc_id": "d7", "source": "news", "category": "news", "created_dt": "2026-01-02", "aliveness_score": 70, "scoring_version": "iai-v2-test", "domain": "c.example"}
+{"doc_id": "d8", "source": "news", "category": "news", "created_dt": "2026-01-02", "aliveness_score": 90, "scoring_version": "iai-v2-test", "domain": "d.example"}
+{"doc_id": "d9", "source": "reddit", "category": "social", "created_dt": "2026-01-03", "aliveness_score": 10, "scoring_version": "iai-v2-test", "domain": "a.example"}
+{"doc_id": "d10", "source": "reddit", "category": "social", "created_dt": "2026-01-03", "aliveness_score": 30, "scoring_version": "iai-v2-test", "domain": "b.example"}
+{"doc_id": "d11", "source": "news", "category": "news", "created_dt": "2026-01-03", "aliveness_score": 50, "scoring_version": "iai-v2-test", "domain": "c.example"}
+{"doc_id": "d12", "source": "news", "category": "news", "created_dt": "2026-01-03", "aliveness_score": 70, "scoring_version": "iai-v2-test", "domain": "d.example"}

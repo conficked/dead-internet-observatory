@@ -1,0 +1,6 @@
+date,source,mean_score,n_docs
+2026-01-01,reddit,40,10
+2026-01-01,news,80,10
+2026-01-02,reddit,50,10
+2026-01-02,news,80,10
+2026-01-03,reddit,50,10

@@ -1,21 +1,64 @@
 analytics:
   anomaly_zscore_threshold: 2.5
+  core_source_panel:
+  - common_crawl
+  - reddit
+  - news
+  - hackernews
+  - bluesky
+  - youtube
+  - fourchan
+  - steam
+  - mastodon
+  - stackoverflow
+  bootstrap_resamples: 400
+  bootstrap_seed: 0
   index_smoothing_window: 7
+  minimum_coverage: 0.8
+  minimum_source_samples: 50
+  minimum_total_samples: 500
+  source_weights:
+    bluesky: 0.059523809524
+    common_crawl: 0.357142857143
+    fourchan: 0.047619047619
+    hackernews: 0.071428571429
+    mastodon: 0.035714285714
+    news: 0.119047619048
+    reddit: 0.178571428571
+    stackoverflow: 0.035714285714
+    steam: 0.035714285714
+    youtube: 0.059523809524
   trend_min_data_points: 14
 app:
   cache_ttl_seconds: 3600
   refresh_hint_seconds: 300
 detection:
+  feature_scaling:
+    provisional: true
+    character_entropy:
+      low: 3.0
+      span: 2.0
+    compression_ratio:
+      low: 0.25
+      span: 0.55
+    hapax_ratio:
+      divisor: 0.7
+    lexical_diversity:
+      low: 0.2
+      span: 0.5
+    yules_k:
+      divisor: 300.0
+      invert: true
   max_text_length_for_features: 5000
   min_text_length: 80
+  scoring_version: iai-v2.0.0-provisional
   weights:
-    burstiness: 0.15
-    entropy: 0.15
-    mtld: 0.12
-    repetition: 0.15
-    sentence_variance: 0.15
-    ttr: 0.18
-    zipf_deviation: 0.1
+    character_entropy: 0.14
+    compression_ratio: 0.14
+    mtld: 0.25
+    repetition: 0.17
+    sentence_variance: 0.18
+    zipf_deviation: 0.12
 project:
   description: Observational signals in sampled public web text
   name: Dead Internet Observatory

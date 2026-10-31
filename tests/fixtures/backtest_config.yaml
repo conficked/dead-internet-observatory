@@ -1,0 +1,19 @@
+storage:
+  db_path: unused.db
+detection:
+  scoring_version: iai-v2-test
+  weights:
+    mtld: 1.0
+analytics:
+  source_weights:
+    reddit: 0.5
+    news: 0.5
+  core_source_panel:
+    - reddit
+    - news
+  minimum_source_samples: 1
+  minimum_total_samples: 1
+  minimum_coverage: 1.0
+  index_smoothing_window: 3
+  bootstrap_resamples: 40
+  bootstrap_seed: 0

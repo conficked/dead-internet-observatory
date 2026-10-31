@@ -240,8 +240,6 @@ class SilverToGoldPipeline:
                 persist_cc_status(gold_path, conn)
             return
 
-        # ── Score, with perplexity disabled for common_crawl (too slow) ───────
-        orig_perplexity = os.environ.get("ENABLE_PERPLEXITY", "")
         if "source" in new_df.columns:
             cc_mask = new_df["source"] == "common_crawl"
         else:
@@ -253,12 +251,8 @@ class SilverToGoldPipeline:
 
         scored_parts = []
         if not cc_only.empty:
-            print(f"[GOLD] Scoring {len(cc_only):,} CC docs (perplexity disabled)")
-            os.environ["ENABLE_PERPLEXITY"] = ""
-            try:
-                scored_parts.append(score_dataframe(cc_only))
-            finally:
-                os.environ["ENABLE_PERPLEXITY"] = orig_perplexity
+            print(f"[GOLD] Scoring {len(cc_only):,} CC docs")
+            scored_parts.append(score_dataframe(cc_only))
 
         if not non_cc.empty:
             print(f"[GOLD] Scoring {len(non_cc):,} non-CC docs")
