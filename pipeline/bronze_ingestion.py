@@ -10,7 +10,11 @@ by uncommenting the marked sections for Databricks/large scale.
 """
 
 import json
+import os
+import shutil
 import hashlib
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
@@ -494,7 +498,8 @@ NORMALISERS = {
 
 # ── Bronze reader ─────────────────────────────────────────────────────────────
 
-def iter_bronze_records(bronze_root: Path, source: str) -> Iterator[tuple]:
+def iter_bronze_records(bronze_root: Path, source: str, counters=None,
+                        with_context=False) -> Iterator[tuple]:
     """Yield (raw_record, partition_string) from all JSONL files for a source."""
     source_dir = bronze_root / source
     if not source_dir.exists():
@@ -504,13 +509,58 @@ def iter_bronze_records(bronze_root: Path, source: str) -> Iterator[tuple]:
         rel_parts = jsonl_file.parent.relative_to(source_dir).parts
         partition = "/".join(rel_parts) if rel_parts else "unknown"
         with open(jsonl_file, encoding="utf-8") as fh:
-            for line in fh:
+            if counters is not None:
+                counters["files_read"] += 1
+            for line_number, line in enumerate(fh, 1):
+                if counters is not None:
+                    counters["lines_read"] += 1
                 line = line.strip()
-                if line:
-                    try:
-                        yield json.loads(line), partition
-                    except json.JSONDecodeError:
-                        continue
+                if not line:
+                    if counters is not None:
+                        counters["blank_lines"] += 1
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    if counters is not None:
+                        counters["malformed_json_lines"] += 1
+                        counters["rejected_records"] += 1
+                    continue
+                if with_context:
+                    yield raw, partition, jsonl_file, line_number
+                else:
+                    yield raw, partition
+
+
+@contextmanager
+def _atomic_parquet_path(destination):
+    with tempfile.NamedTemporaryFile(dir=destination.parent,
+                                     prefix=f".{destination.name}.",
+                                     suffix=".tmp", delete=False) as fh:
+        temporary = Path(fh.name)
+    try:
+        yield temporary
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _fsync_path(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_manifest(transaction, manifest):
+    temporary = transaction / 'manifest.tmp'
+    with temporary.open('w') as stream:
+        json.dump(manifest, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, transaction / 'manifest.json')
+    _fsync_path(transaction)
 
 
 # ── Silver writer ─────────────────────────────────────────────────────────────
@@ -524,22 +574,60 @@ class BronzeToSilverPipeline:
         self.bronze_root = data_root / self.config["storage"]["bronze_path"]
         self.silver_root = data_root / self.config["storage"]["silver_path"]
         self.silver_root.mkdir(parents=True, exist_ok=True)
+        self._recover_publication()
+        self.source_summaries = {}
         self.db_path = self.config["storage"].get("db_path", "./data/observatory.db")
+
+    def _recover_publication(self):
+        transaction = self.silver_root / '.silver-transaction'
+        if not transaction.exists():
+            return
+        manifest_path = transaction / 'manifest.json'
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text())
+            if manifest['state'] == 'publishing':
+                for name, existed in manifest['outputs'].items():
+                    target = self.silver_root / name
+                    if existed:
+                        # Keep backups intact so recovery itself is restartable.
+                        temporary = transaction / 'restore.tmp'
+                        shutil.copyfile(transaction / 'backups' / name, temporary)
+                        _fsync_path(temporary)
+                        os.replace(temporary, target)
+                    else:
+                        target.unlink(missing_ok=True)
+                    _fsync_path(self.silver_root)
+                _write_manifest(transaction, dict(manifest, state='rolled_back'))
+        shutil.rmtree(transaction)
+        _fsync_path(self.silver_root)
 
     def process_source(self, source: str) -> pd.DataFrame:
         """Normalise and deduplicate all bronze records for one source."""
         print(f"\n[PIPELINE] Processing source: {source}")
         normaliser = NORMALISERS.get(source.split("/")[0])
-        if not normaliser:
-            print(f"  No normaliser for {source}")
-            return pd.DataFrame()
+        counters = dict.fromkeys([
+            "files_read", "lines_read", "blank_lines", "malformed_json_lines",
+            "normalization_failures", "empty_or_unsupported_records",
+            "duplicate_content_hashes", "accepted_documents", "rejected_records",
+        ], 0)
+        self.source_summaries[source] = counters
 
         docs: List[Dict] = []
         seen_hashes: set = set()
 
-        for raw, partition in iter_bronze_records(self.bronze_root, source):
-            result = normaliser(raw, partition)
-            if result is None:
+        for raw, partition, path, line_number in iter_bronze_records(
+                self.bronze_root, source, counters, with_context=True):
+            try:
+                result = normaliser(raw, partition) if normaliser else None
+            except Exception as exc:
+                counters["normalization_failures"] += 1
+                counters["rejected_records"] += 1
+                print(f"  Normalization failed source={source} file={path} "
+                      f"line={line_number}: {type(exc).__name__}: {exc}")
+                continue
+            if result is None or result == []:
+                counters["empty_or_unsupported_records"] += 1
+                counters["rejected_records"] += 1
                 continue
             if isinstance(result, list):
                 results = result
@@ -550,7 +638,12 @@ class BronzeToSilverPipeline:
                 if h and h not in seen_hashes:
                     seen_hashes.add(h)
                     docs.append(doc)
+                    counters["accepted_documents"] += 1
+                else:
+                    counters["duplicate_content_hashes"] += 1
 
+        print(f"[PIPELINE] source={source} " + " ".join(
+            f"{key}={value}" for key, value in counters.items()))
         if not docs:
             print(f"  No records found for {source}")
             return pd.DataFrame()
@@ -558,8 +651,9 @@ class BronzeToSilverPipeline:
         df = pd.DataFrame(docs, columns=SILVER_COLUMNS)
         df["created_dt"] = pd.to_datetime(df["created_dt"], errors="coerce", utc=True).dt.as_unit("us")
 
-        out = self.silver_root / f"{source.replace('/', '_')}.parquet"
-        df.to_parquet(out, index=False, engine="pyarrow")
+        out = getattr(self, "_staging_root", self.silver_root) / f"{source.replace('/', '_')}.parquet"
+        with _atomic_parquet_path(out) as temporary:
+            df.to_parquet(temporary, index=False, engine="pyarrow")
         print(f"  ✓ {len(df):,} records → {out}")
         return df
 
@@ -572,20 +666,57 @@ class BronzeToSilverPipeline:
             "stackoverflow", "mastodon", "substack", "github",
         ]
         out = self.silver_root / "combined.parquet"
-        writer = pq.ParquetWriter(out, SILVER_SCHEMA)
         total = 0
 
+        self._recover_publication()
+        transaction = self.silver_root / '.silver-transaction'
+        transaction.mkdir()
+        _fsync_path(self.silver_root)
+        staging = transaction / 'staged'
+        staging.mkdir()
+        self._staging_root = staging
         try:
-            for src in sources:
-                df = self.process_source(src)
-                if df.empty:
-                    continue
-                table = pa.Table.from_pandas(df, schema=SILVER_SCHEMA, preserve_index=False)
-                writer.write_table(table)
-                total += len(df)
-                del df, table  # free each source's memory before loading the next
-        finally:
-            writer.close()
+            try:
+                with pq.ParquetWriter(staging / out.name, SILVER_SCHEMA) as writer:
+                    for src in sources:
+                        df = self.process_source(src)
+                        if df.empty:
+                            continue
+                        table = pa.Table.from_pandas(df, schema=SILVER_SCHEMA, preserve_index=False)
+                        writer.write_table(table)
+                        total += len(df)
+                        del df, table
+            finally:
+                del self._staging_root
+
+            names = [src.replace('/', '_') + '.parquet' for src in sources] + [out.name]
+            backups = transaction / 'backups'
+            backups.mkdir()
+            outputs = {}
+            for name in names:
+                target = self.silver_root / name
+                outputs[name] = target.exists()
+                if target.exists():
+                    shutil.copyfile(target, backups / name)
+                    _fsync_path(backups / name)
+                if (staging / name).exists():
+                    _fsync_path(staging / name)
+            _fsync_path(backups)
+            _fsync_path(staging)
+            manifest = dict(state='publishing', outputs=outputs)
+            _write_manifest(transaction, manifest)
+            for name in names:
+                target = self.silver_root / name
+                if (staging / name).exists():
+                    (staging / name).replace(target)
+                else:
+                    target.unlink(missing_ok=True)
+                _fsync_path(self.silver_root)
+            _write_manifest(transaction, dict(manifest, state='committed'))
+        except BaseException:
+            self._recover_publication()
+            raise
+        self._recover_publication()
 
         if total:
             print(f"\n[PIPELINE] Combined silver: {total:,} records → {out}")

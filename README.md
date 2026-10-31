@@ -6,8 +6,8 @@ The [Dead Internet Theory](https://en.wikipedia.org/wiki/Dead_Internet_theory) h
 
 This project computes an experimental **Internet Aliveness Index (IAI)** from linguistic signals in collected public web text. The 0–100 score is observational, not a calibrated AI probability or an estimate of the fraction of the internet that is synthetic. Coverage varies by source and collection date.
 
-No paid model APIs or subscriptions. Detection runs locally with classical NLP
-signals plus optional DistilGPT-2 perplexity scoring.
+No paid model APIs or subscriptions. Detection runs locally with one versioned,
+CPU-compatible feature regime across every source.
 
 ---
 
@@ -15,7 +15,7 @@ signals plus optional DistilGPT-2 perplexity scoring.
 
 > Live at: **[deadinternetobservatory.streamlit.app](https://deadinternetobservatory.streamlit.app/)**
 
-- Current published score and individually dated source means from a SQLite snapshot
+- Current experimental synthetic-content signal, hidden when coverage or the sample minimum is missed, plus individually dated source means from a SQLite snapshot
 - Common Crawl per-crawl medians and bootstrap confidence intervals for the observed 2014–2026 record
 - Per-platform two-week medians for 2026, plus a fixed equal-weight panel composite only when every panel source meets the minimum sample count
 - Methodology, coverage and limitations
@@ -24,24 +24,112 @@ signals plus optional DistilGPT-2 perplexity scoring.
 
 ## How the Index Works
 
-The IAI uses seven classical linguistic and behavioural signals:
+The dashboard labels the score as an **experimental synthetic-content signal**. It is
+not a calibrated probability of authorship and it is not an estimate of how much of
+the public web was written by a model. The headline number is hidden when core-source
+coverage or the sample minimum is missed.
 
-| Signal | Weight | Feature interpretation |
+The provisional IAI v2 headline uses six configured signals. Weights are provisional
+defaults, not measured optima:
+
+| Signal | Provisional weight | Feature interpretation |
 |---|---|---|
-| **Type-Token Ratio** | 18% | Vocabulary diversity |
-| **Shannon Entropy** | 15% | Character distribution diversity |
-| **Sentence Length Variance** | 15% | Variation in sentence lengths |
-| **Bigram Repetition** | 15% | Repeated adjacent word pairs |
-| **Temporal Burstiness** | 15% | Timing variation (neutral when timestamps are absent) |
-| **MTLD** | 12% | Lexical diversity; length effects can remain |
-| **Zipf Law Alignment** | 10% | Fit to a ranked word-frequency distribution |
+| **MTLD** | 25% | Lexical diversity |
+| **Sentence length variance** | 18% | Variation in sentence lengths |
+| **Bigram repetition** | 17% | Repeated adjacent word pairs |
+| **Zipf alignment** | 12% | Fit to a ranked word-frequency distribution |
+| **Compression ratio** | 14% | Repetition and predictability in encoded text |
+| **Character entropy** | 14% | Character distribution diversity |
 
-All signals are statistical. No external model calls, no GPU required. Everything runs on standard CPU in Python.
+Hapax ratio, Yule's K, windowed lexical diversity and type-token ratio are still
+extracted and stored. They are omitted from the headline so vocabulary richness is
+not counted again beside MTLD. `scripts/feature_ablation.py` reports their correlation.
+Compression ratio, hapax ratio and Yule's K used in scoring are means of fixed windows
+(256 bytes, or 50 tokens, dropping a trailing partial token window). The full-document
+values are kept as `feat_compression_ratio_raw`, `feat_hapax_ratio_raw` and
+`feat_yules_k_raw`.
 
-When enabled with `ENABLE_PERPLEXITY=1`, local DistilGPT-2 perplexity receives
-15% of the score and scales the classical weights proportionally. Common Crawl
-disables perplexity to limit runtime. Scoring modes and genre affect comparability.
-Short texts score lower; token thresholds reduce but do not remove length confounding.
+The maps from those newer raw features onto 0–1 sub-scores are labeled
+`feature_scaling.provisional: true` in `config/config.yaml`. A calibration JSON file's
+`feature_scaling` block can replace that config block. With fewer than 200 labeled
+documents the calibration report keeps `retained_provisional_config` and does not
+replace the production weights.
+
+Perplexity is excluded from the headline so every source uses the same CPU feature
+set. Burstiness and posting regularity live in the source-level behavior layer
+(`analytics/source_behavior.py`). They are not document sub-scores.
+
+Each source is aggregated once, across categories, before its source weight is
+applied. The headline uses the fixed `core_source_panel`. Missing panel weight is
+reported as coverage and is not renormalized when coverage is below
+`minimum_coverage` (0.80). That threshold stays at 0.80: the tracked 2026 biweekly
+file never clears the full panel, because Reddit is absent from those bins and
+Common Crawl is a separate crawl series. Do not lower the threshold to force a
+headline. `analytics/coverage_audit.py` records the comparison. The local SQLite
+ledger in this checkout has no daily rows, so it does not supply a count of days
+that would lose a headline.
+
+Only documents whose `scoring_version` equals the configured regime enter the
+headline. Other versions, and rows with no regime, stay out of the mean, the
+coverage numerator and the sample counts. A day with no current-regime documents
+is marked `withheld:no-current-regime`. `index_quality.noncurrent_docs` counts the
+excluded documents, and `regime_sufficient` is 1 only when that count is 0.
+Smoothing uses a trailing window, so a later day does not rewrite earlier smoothed
+values. Source and composite intervals are cluster bootstrap percentiles with a
+fixed seed. A source with fewer than two clusters, or a day whose document ledger
+does not match `daily_index.n_docs`, is published as a point with a null interval.
+
+`composite_index` stays six columns: `date`, `aliveness_index`, `smoothed_index`,
+`n_docs`, `anomaly_flag`, `anomaly_reason`. Coverage, sufficiency and intervals are
+stored on `index_quality`. Per-source intervals are stored on `source_interval`.
+`scoring_regimes` stores the version for each document, daily group and composite
+row. Older snapshots that lack `index_quality` still show their stored smoothed
+value in the dashboard, with quality marked unavailable.
+
+Genre, language, source and document length still affect comparability. Token
+thresholds reduce length confounding and do not remove it.
+
+### Labeled calibration schema
+
+`scripts/calibrate_detector.py` reads JSONL or CSV. Required columns are `doc_id`,
+`text` and `label` (`human` / `generated`, or `0` / `1` with 1 meaning generated).
+Optional columns are `source`, `genre`, `language`, `domain` and `generator`.
+Token length is binned as short (under 80), medium (under 200) or long. The model
+is L2 logistic regression on the extracted features, with the generated class as
+the positive class. It reports accuracy, ROC AUC, Brier score and log loss,
+stratified by source, genre, language and length bin, plus leave-one-generator-out
+and leave-one-domain-out where the file has both classes. Outputs use schema
+`iai-v2-analysis-1`, a fixed seed, the input SHA-256, and no timestamp.
+
+```bash
+.venv/bin/python scripts/calibrate_detector.py \
+    --input tests/fixtures/labeled_documents.jsonl \
+    --config config/config.yaml \
+    --output /tmp/calibration.json \
+    --seed 0
+.venv/bin/python scripts/backtest_index.py \
+    --input tests/fixtures/scored_documents.jsonl \
+    --config tests/fixtures/backtest_config.yaml \
+    --output /tmp/backtest.json \
+    --seed 0
+.venv/bin/python scripts/feature_ablation.py \
+    --input tests/fixtures/labeled_documents.jsonl \
+    --output /tmp/ablation.json \
+    --seed 0
+.venv/bin/python scripts/weight_sensitivity.py \
+    --input tests/fixtures/labeled_documents.jsonl \
+    --config config/config.yaml \
+    --output /tmp/sensitivity.json \
+    --seed 0
+.venv/bin/python scripts/source_drift.py \
+    --input tests/fixtures/source_daily.csv \
+    --output /tmp/drift.json \
+    --seed 0
+```
+
+The checked-in fixtures are small and are for the tests. They are not a labeled
+corpus. Treat script output from those files as a contract check, not as a
+calibration of the public index.
 
 ---
 
@@ -82,7 +170,7 @@ Token thresholds can be changed with `--min-tokens` and `--min-tokens-crawl`.
 
 Common Crawl has an independent 50000-document pipeline quota and a 10000-row
 per-crawl cap counting existing gold rows, selected round-robin across crawls.
-Other sources retain the newest-first 6000-document quota. CC remains perplexity-free.
+Other sources retain the newest-first 6000-document quota.
 The minion harvests up to five crawls per run, five WET files per crawl and 2000
 records per file, stopping at the remaining per-crawl quota. Failed files receive
 three retries with backoff, then replacement files. Attempts and successful segment

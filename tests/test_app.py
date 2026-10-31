@@ -2,6 +2,8 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+
+import pytest
 from types import ModuleType
 from unittest.mock import Mock, patch
 
@@ -263,6 +265,83 @@ def test_score_axis_fits_data_with_padding():
 
 def test_cc_excluded_from_platform_options():
     assert app.platform_options(pd.DataFrame({'source': ['common_crawl', 'reddit']})) == ['reddit']
+
+
+def test_headline_is_hidden_when_quality_thresholds_fail(tmp_path):
+    path = tmp_path / "observatory.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE composite_index (date TEXT, aliveness_index REAL, smoothed_index REAL, "
+            "n_docs INTEGER, anomaly_flag INTEGER, anomaly_reason TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE index_quality (date TEXT, source_coverage REAL, coverage_sufficient INTEGER, "
+            "sample_sufficient INTEGER, eligible_sources INTEGER, required_sources INTEGER, "
+            "ci_low REAL, ci_high REAL)"
+        )
+        conn.execute("INSERT INTO composite_index VALUES ('2026-01-02', 40, 41, 10, 0, '')")
+        conn.execute("INSERT INTO index_quality VALUES ('2026-01-02', 0.4, 0, 1, 2, 10, 30, 50)")
+    view = app.load_headline(str(path))
+    assert view["score"] is None
+    assert view["withheld"] is True
+    assert view["source_coverage"] == 0.4
+
+
+def test_headline_shows_score_and_interval_when_sufficient(tmp_path):
+    path = tmp_path / "observatory.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE composite_index (date TEXT, aliveness_index REAL, smoothed_index REAL, "
+            "n_docs INTEGER, anomaly_flag INTEGER, anomaly_reason TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE index_quality (date TEXT, source_coverage REAL, coverage_sufficient INTEGER, "
+            "sample_sufficient INTEGER, eligible_sources INTEGER, required_sources INTEGER, "
+            "ci_low REAL, ci_high REAL)"
+        )
+        conn.execute("INSERT INTO composite_index VALUES ('2026-01-02', 40, 41, 800, 0, '')")
+        conn.execute("INSERT INTO index_quality VALUES ('2026-01-02', 0.9, 1, 1, 8, 10, 30, 50)")
+    view = app.load_headline(str(path))
+    assert view["score"] == 41
+    assert view["ci_low"] == 30
+    assert view["ci_high"] == 50
+    assert view["withheld"] is False
+    assert "Experimental synthetic-content signal" in app.EXPERIMENTAL_SIGNAL_LABEL
+
+
+def test_legacy_snapshot_without_quality_table_still_returns_score(tmp_path):
+    path = DatabasePathTests()._database(str(tmp_path))
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO composite_index VALUES ('2026-01-01', 50, 52, 20, 0, '')")
+    view = app.load_headline(path)
+    assert view["score"] == 52
+    assert view["withheld"] is False
+    assert view["quality_available"] is False
+
+
+def test_movement_separates_score_change_from_source_composition(tmp_path):
+    path = tmp_path / "movement.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE daily_index (date TEXT, source TEXT, mean_score REAL, n_docs INTEGER)")
+        conn.executemany("INSERT INTO daily_index VALUES (?,?,?,?)", [
+            ("2026-01-01", "reddit", 40, 100),
+            ("2026-01-01", "news", 80, 100),
+            ("2026-01-02", "reddit", 60, 100),
+            ("2026-01-02", "news", 80, 100),
+        ])
+    movement = app.load_movement(str(path))
+    assert movement["composition_effect"] == pytest.approx(0, abs=1e-6)
+    assert movement["score_effect"] > 0
+    caption = app.movement_caption(movement)
+    assert "Source-composition" in caption
+    assert "within sources" in caption
+
+
+def test_dashboard_copy_calls_the_score_an_experimental_signal():
+    source = Path(__file__).resolve().parents[1].joinpath("app", "app.py").read_text()
+    assert "Experimental synthetic-content signal" in source
+    assert "Temporal burstiness receives" not in source
+    assert "synthetic content %" not in source.lower()
 
 
 def test_crawl_chart_ci_spread_and_gaps():

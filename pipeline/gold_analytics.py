@@ -4,7 +4,7 @@ Gold-layer analytics — time-series computations over the composite index.
 Generates:
   - Rolling decay rate (slope of smoothed IAI over configurable windows)
   - Source divergence score (std across source scores on same day)
-  - Synthetic content estimate (100 - IAI, with confidence interval)
+  - A 100-minus-index helper that is not a calibrated authorship share
   - Trend classification (stable / declining / recovering / crash)
 """
 
@@ -45,8 +45,11 @@ def classify_trend(slope_per_day: float, threshold: float = 0.05) -> str:
 
 def synthetic_content_estimate(iai: float) -> Tuple[float, float, float]:
     """
-    Returns (point_estimate, lower_ci, upper_ci) for synthetic content %.
-    Uncertainty grows as IAI approaches extremes.
+    Return (point, lower, upper) for 100 minus the index.
+
+    This helper is not a calibrated share of synthetic text, and the dashboard
+    does not publish it as one. The band is a fixed formula that widens near
+    the middle of the 0–100 scale. It is not a sampling interval.
     """
     point = 100.0 - iai
     std = 5.0 + 10.0 * (1.0 - abs(iai - 50) / 50.0)   # max uncertainty at 50

@@ -14,14 +14,35 @@ Signals implemented:
   sentence_variance — CV of sentence lengths (AI text is suspiciously uniform)
   repetition       — Ratio of repeated bigrams to total bigrams
   zipf_deviation   — Deviation from Zipf's power-law for natural language
-  burstiness       — Goh-Barabasi burstiness of inter-event times (for temporal data)
+  burstiness       — Goh-Barabasi burstiness of inter-event times.
+                       Document scoring does not use it. Source-level summaries do.
+
+Compression ratio, hapax ratio and Yule's K are averaged over fixed windows so a
+repeated passage keeps the same value as it grows. The full-document values are
+retained as *_raw features. The [0, 1] maps for the five newer features are
+provisional until a labeled calibration file replaces them.
 """
 
 import math
 import re
-from typing import Dict, List, Optional, Tuple
+import zlib
+from typing import Dict, List, Optional
 
 import numpy as np
+
+# Fixed windows make repeated text produce the same feature value at different lengths.
+TOKEN_WINDOW = 50
+COMPRESSION_WINDOW_BYTES = 256
+
+# Uncalibrated maps from raw features to [0, 1]. Calibration JSON can replace them.
+PROVISIONAL_FEATURE_SCALING = {
+    "provisional": True,
+    "compression_ratio": {"low": 0.25, "span": 0.55},
+    "character_entropy": {"low": 3.0, "span": 2.0},
+    "hapax_ratio": {"divisor": 0.7},
+    "yules_k": {"divisor": 300.0, "invert": True},
+    "lexical_diversity": {"low": 0.2, "span": 0.5},
+}
 
 
 # ── Text tokenisation ─────────────────────────────────────────────────────────
@@ -104,6 +125,93 @@ def compute_entropy(tokens: List[str]) -> float:
         freq[tok] = freq.get(tok, 0) + 1
     n = len(tokens)
     return -sum((c / n) * math.log2(c / n) for c in freq.values())
+
+
+def _compression_ratio(raw: bytes) -> float:
+    if not raw:
+        return 0.0
+    return len(zlib.compress(raw)) / len(raw)
+
+
+def compute_compression_ratio(text: str, window: int = COMPRESSION_WINDOW_BYTES) -> float:
+    """Mean zlib ratio over non-overlapping byte windows.
+
+    A short document uses its whole byte string. A longer document drops a trailing
+    partial window so repeated text stays comparable across lengths.
+    """
+    raw = text.encode("utf-8")
+    if not raw:
+        return 0.0
+    if len(raw) <= window:
+        return _compression_ratio(raw)
+    ratios = [
+        _compression_ratio(raw[start:start + window])
+        for start in range(0, len(raw) - window + 1, window)
+    ]
+    return float(np.mean(ratios))
+
+
+def compute_character_entropy(text: str) -> float:
+    if not text:
+        return 0.0
+    frequencies: Dict[str, int] = {}
+    for character in text:
+        frequencies[character] = frequencies.get(character, 0) + 1
+    length = len(text)
+    return -sum((count / length) * math.log2(count / length)
+                for count in frequencies.values())
+
+
+def _hapax_ratio(tokens: List[str]) -> float:
+    if not tokens:
+        return 0.0
+    frequencies: Dict[str, int] = {}
+    for token in tokens:
+        frequencies[token] = frequencies.get(token, 0) + 1
+    return sum(count == 1 for count in frequencies.values()) / len(frequencies)
+
+
+def _window_mean(tokens: List[str], window: int, measure) -> float:
+    if not tokens:
+        return 0.0
+    if len(tokens) <= window:
+        return float(measure(tokens))
+    return float(np.mean([
+        measure(tokens[start:start + window])
+        for start in range(0, len(tokens) - window + 1, window)
+    ]))
+
+
+def compute_hapax_ratio(tokens: List[str], window: int = TOKEN_WINDOW) -> float:
+    """Mean hapax-type ratio over non-overlapping token windows."""
+    return _window_mean(tokens, window, _hapax_ratio)
+
+
+def _yules_k(tokens: List[str]) -> float:
+    if not tokens:
+        return 0.0
+    frequencies: Dict[str, int] = {}
+    for token in tokens:
+        frequencies[token] = frequencies.get(token, 0) + 1
+    length = len(tokens)
+    frequency_moment = sum(count * count for count in frequencies.values())
+    return 10_000.0 * (frequency_moment - length) / (length * length)
+
+
+def compute_yules_k(tokens: List[str], window: int = TOKEN_WINDOW) -> float:
+    """Mean Yule's K over non-overlapping token windows."""
+    return _window_mean(tokens, window, _yules_k)
+
+
+def compute_lexical_diversity(tokens: List[str], window: int = TOKEN_WINDOW) -> float:
+    if not tokens:
+        return 0.0
+    if len(tokens) <= window:
+        return len(set(tokens)) / len(tokens)
+    return float(np.mean([
+        len(set(tokens[start:start + window])) / window
+        for start in range(len(tokens) - window + 1)
+    ]))
 
 
 def compute_sentence_variance(text: str) -> float:
@@ -224,6 +332,14 @@ def extract_features(
         "sentence_variance": compute_sentence_variance(text),
         "repetition": compute_repetition(tokens),
         "zipf_deviation": compute_zipf_deviation(tokens),
+        "compression_ratio": compute_compression_ratio(text),
+        "compression_ratio_raw": _compression_ratio(text.encode("utf-8")),
+        "character_entropy": compute_character_entropy(text),
+        "hapax_ratio": compute_hapax_ratio(tokens),
+        "hapax_ratio_raw": _hapax_ratio(tokens),
+        "yules_k": compute_yules_k(tokens),
+        "yules_k_raw": _yules_k(tokens),
+        "lexical_diversity": compute_lexical_diversity(tokens),
         "token_count": len(tokens),
         "sentence_count": len(sentences(text)),
         "avg_word_length": (
@@ -231,19 +347,52 @@ def extract_features(
         ),
     }
 
-    if timestamps:
-        features["burstiness"] = compute_burstiness(timestamps)
-    else:
-        features["burstiness"] = 0.5   # neutral when no temporal data
-
     return features
 
 
-def features_to_scores(features: Dict[str, float]) -> Dict[str, float]:
+def resolve_feature_scaling(overrides: Optional[Dict] = None) -> Dict:
+    """Merge a calibration block onto the provisional scaling map."""
+    resolved = {
+        key: (dict(value) if isinstance(value, dict) else value)
+        for key, value in PROVISIONAL_FEATURE_SCALING.items()
+    }
+    for key, value in (overrides or {}).items():
+        if key == "provisional":
+            resolved["provisional"] = bool(value)
+        elif isinstance(value, dict) and isinstance(resolved.get(key), dict):
+            merged = dict(resolved[key])
+            merged.update(value)
+            resolved[key] = merged
+    return resolved
+
+
+def _linear_unit(value: float, spec: Dict) -> float:
+    span = float(spec.get("span", 1.0))
+    if span == 0:
+        return 0.0
+    return min(1.0, max(0.0, (float(value) - float(spec.get("low", 0.0))) / span))
+
+
+def _divisor_unit(value: float, spec: Dict) -> float:
+    divisor = float(spec.get("divisor", 1.0))
+    if divisor == 0:
+        return 0.0
+    scaled = min(1.0, max(0.0, float(value) / divisor))
+    if spec.get("invert"):
+        return max(0.0, 1.0 - scaled)
+    return scaled
+
+
+def features_to_scores(features: Dict[str, float], scaling: Optional[Dict] = None) -> Dict[str, float]:
     """
     Normalise raw features to [0, 1] aliveness sub-scores.
     Higher sub-score always means "more alive / human-like".
+
+    Scaling for compression, character entropy, hapax ratio, Yule's K and
+    lexical diversity comes from PROVISIONAL_FEATURE_SCALING unless a calibration
+    block replaces those maps.
     """
+    scaling = resolve_feature_scaling(scaling)
     scores: Dict[str, float] = {}
 
     # TTR: 0.3–0.7 is typical human; cap and scale
@@ -269,7 +418,15 @@ def features_to_scores(features: Dict[str, float]) -> Dict[str, float]:
     # Zipf: already [0, 1]
     scores["zipf_deviation"] = features.get("zipf_deviation", 0.5)
 
-    # Burstiness: already [0, 1]
-    scores["burstiness"] = features.get("burstiness", 0.5)
+    scores["compression_ratio"] = _linear_unit(
+        features.get("compression_ratio", 0.0), scaling["compression_ratio"])
+    scores["character_entropy"] = _linear_unit(
+        features.get("character_entropy", 0.0), scaling["character_entropy"])
+    scores["hapax_ratio"] = _divisor_unit(
+        features.get("hapax_ratio", 0.0), scaling["hapax_ratio"])
+    scores["yules_k"] = _divisor_unit(
+        features.get("yules_k", 0.0), scaling["yules_k"])
+    scores["lexical_diversity"] = _linear_unit(
+        features.get("lexical_diversity", 0.0), scaling["lexical_diversity"])
 
     return scores

@@ -212,19 +212,72 @@ sources:
       - https://marginalrevolution.com/
 
 detection:
+  scoring_version: iai-v2.0.0-provisional
   min_text_length: 80
   max_text_length_for_features: 5000
-  # Component weights must sum to 1.0
+  # Provisional headline weights. They must sum to 1.0.
+  # Hapax ratio, Yule's K, windowed lexical diversity and type-token ratio are
+  # still extracted. They are omitted here so the vocabulary-richness family is
+  # not counted alongside MTLD. scripts/feature_ablation.py measures the correlation.
   weights:
-    ttr: 0.18
-    mtld: 0.12
-    entropy: 0.15
-    sentence_variance: 0.15
-    repetition: 0.15
-    burstiness: 0.15
-    zipf_deviation: 0.10
+    mtld: 0.25
+    sentence_variance: 0.18
+    repetition: 0.17
+    zipf_deviation: 0.12
+    compression_ratio: 0.14
+    character_entropy: 0.14
+  # Provisional maps from raw features to [0, 1]. Replace this block with
+  # feature_scaling from scripts/calibrate_detector.py after a real labeled run.
+  feature_scaling:
+    provisional: true
+    compression_ratio:
+      low: 0.25
+      span: 0.55
+    character_entropy:
+      low: 3.0
+      span: 2.0
+    hapax_ratio:
+      divisor: 0.7
+    yules_k:
+      divisor: 300.0
+      invert: true
+    lexical_diversity:
+      low: 0.2
+      span: 0.5
 
 analytics:
+  # Provisional fixed-panel weights derived by normalizing the v1 weights
+  # across sources with supported, comparable timeline data.
+  source_weights:
+    common_crawl: 0.357142857143
+    reddit: 0.178571428571
+    news: 0.119047619048
+    hackernews: 0.071428571429
+    bluesky: 0.059523809524
+    youtube: 0.059523809524
+    fourchan: 0.047619047619
+    steam: 0.035714285714
+    mastodon: 0.035714285714
+    stackoverflow: 0.035714285714
+  core_source_panel:
+    - common_crawl
+    - reddit
+    - news
+    - hackernews
+    - bluesky
+    - youtube
+    - fourchan
+    - steam
+    - mastodon
+    - stackoverflow
+  minimum_source_samples: 50
+  minimum_total_samples: 500
+  # Kept at 0.80. The tracked 2026 biweekly file never clears this panel:
+  # reddit is absent and common crawl is a separate crawl series. Do not lower
+  # this value to force a headline. See analytics/coverage_audit.py.
+  minimum_coverage: 0.80
+  bootstrap_resamples: 400
+  bootstrap_seed: 0
   index_smoothing_window: 21       # days for rolling average
   anomaly_zscore_threshold: 2.5
   trend_min_data_points: 14

@@ -9,61 +9,64 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+import yaml
 
-from .linguistic_features import extract_features, features_to_scores
-from .perplexity_scorer import is_enabled as perplexity_enabled
-from .perplexity_scorer import score_perplexity
+from .linguistic_features import extract_features, features_to_scores, resolve_feature_scaling
 
 
 # ── Weights (must match config/config.yaml detection.weights) ────────────────
 
-DEFAULT_WEIGHTS: Dict[str, float] = {
-    "ttr": 0.18,
-    "mtld": 0.12,
-    "entropy": 0.15,
-    "sentence_variance": 0.15,
-    "repetition": 0.15,
-    "burstiness": 0.15,
-    "zipf_deviation": 0.10,
+SCORABLE_FEATURES = {
+    "ttr", "mtld", "entropy", "sentence_variance", "repetition",
+    "zipf_deviation", "compression_ratio", "character_entropy",
+    "hapax_ratio", "yules_k", "lexical_diversity",
 }
 
-PERPLEXITY_WEIGHT = 0.15
+
+def validate_weights(weights: Dict[str, float]) -> Dict[str, float]:
+    unknown = sorted(set(weights) - SCORABLE_FEATURES)
+    if unknown:
+        raise ValueError(f"Detector weights contain unknown features: {', '.join(unknown)}")
+    if not weights or any(not np.isfinite(value) or value < 0 for value in weights.values()):
+        raise ValueError("Detector weights must be finite non-negative values")
+    if not np.isclose(sum(weights.values()), 1.0, atol=1e-9):
+        raise ValueError("Detector weights must sum to 1.0")
+    return dict(weights)
 
 
-def _get_weights(include_perplexity: bool = False) -> dict:
-    if not include_perplexity:
-        return DEFAULT_WEIGHTS
-    scale = 1.0 - PERPLEXITY_WEIGHT
-    return {k: round(v * scale, 4) for k, v in DEFAULT_WEIGHTS.items()} | {"perplexity": PERPLEXITY_WEIGHT}
+def load_scoring_config(config_path: str = "config/config.yaml"):
+    with open(config_path) as handle:
+        detection = yaml.safe_load(handle).get("detection", {})
+    version = detection.get("scoring_version")
+    if not version:
+        raise ValueError("detection.scoring_version is required")
+    scaling = resolve_feature_scaling(detection.get("feature_scaling") or {})
+    return version, validate_weights(detection.get("weights", {})), scaling
+
+
+def _score_document(text: str, version: str, weights: Dict[str, float], scaling: Dict) -> Dict:
+    features = extract_features(text)
+    sub_scores = features_to_scores(features, scaling)
+    composite = sum(sub_scores.get(name, 0.5) * weight
+                    for name, weight in weights.items()) * 100.0
+    return {
+        "aliveness_score": round(float(np.clip(composite, 0.0, 100.0)), 2),
+        "scoring_version": version,
+        **{f"feat_{key}": value for key, value in features.items()},
+        **{f"score_{key}": round(value, 4) for key, value in sub_scores.items()},
+    }
 
 
 def score_document(text: str, timestamps: Optional[List[float]] = None,
-                   weights: Optional[Dict[str, float]] = None) -> Dict:
+                   weights: Optional[Dict[str, float]] = None,
+                   config_path: str = "config/config.yaml") -> Dict:
     """
     Score a single document.
     Returns dict with raw features, sub-scores, and composite aliveness_score [0, 100].
     """
-    use_perplexity = perplexity_enabled()
-    w = weights or _get_weights(include_perplexity=use_perplexity)
-    features = extract_features(text, timestamps)
-    sub_scores = features_to_scores(features)
-
-    if use_perplexity:
-        sub_scores["perplexity"] = score_perplexity(text)
-
-    composite = sum(sub_scores.get(k, 0.5) * v for k, v in w.items()) * 100.0
-    composite = round(float(np.clip(composite, 0.0, 100.0)), 2)
-
-    result = {
-        "aliveness_score": composite,
-        **{f"feat_{k}": v for k, v in features.items()},
-        **{f"score_{k}": round(v, 4) for k, v in sub_scores.items()},
-    }
-
-    if use_perplexity:
-        result["score_perplexity"] = round(sub_scores["perplexity"], 4)
-
-    return result
+    version, configured_weights, scaling = load_scoring_config(config_path)
+    resolved_weights = validate_weights(weights) if weights else configured_weights
+    return _score_document(text, version, resolved_weights, scaling)
 
 
 def score_dataframe(
@@ -71,21 +74,23 @@ def score_dataframe(
     text_col: str = "text",
     weights: Optional[Dict[str, float]] = None,
     batch_size: int = 500,
+    config_path: str = "config/config.yaml",
 ) -> pd.DataFrame:
     """
     Vectorised scoring of a silver-layer DataFrame.
     Adds aliveness_score + all feature/sub-score columns in place.
     """
     print(f"[DETECTOR] Scoring {len(df):,} documents …")
-    print(f"[DETECTOR] Perplexity scoring: {'ON' if perplexity_enabled() else 'OFF'}")
-    w = weights or _get_weights(include_perplexity=perplexity_enabled())
+    version, configured_weights, scaling = load_scoring_config(config_path)
+    resolved_weights = validate_weights(weights) if weights else configured_weights
+    print(f"[DETECTOR] Scoring regime: {version}")
 
     results: List[Dict] = []
     for i in range(0, len(df), batch_size):
         batch = df.iloc[i : i + batch_size]
         for _, row in batch.iterrows():
             text = str(row.get(text_col, "") or "")
-            scored = score_document(text, weights=w)
+            scored = _score_document(text, version, resolved_weights, scaling)
             results.append(scored)
         if (i // batch_size) % 10 == 0:
             print(f"  … {min(i + batch_size, len(df)):,}/{len(df):,}")

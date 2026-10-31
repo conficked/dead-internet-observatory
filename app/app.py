@@ -45,6 +45,8 @@ REQUIRED_DATABASE_SCHEMA = {
     "meta": {"key", "value"},
 }
 
+EXPERIMENTAL_SIGNAL_LABEL = "Experimental synthetic-content signal"
+
 
 @st.cache_resource()
 def _database_path_state() -> dict:
@@ -348,6 +350,200 @@ def load_total_docs(path: str) -> int:
     return int(data[0]["value"])
 
 
+def _table_columns(path: str, table: str) -> set:
+    rows = _query(path, f'PRAGMA table_info("{table}")')
+    return {row["name"] for row in rows}
+
+
+def _dashboard_panel_settings(config_path: str = CONFIG_PATH):
+    """Read panel weights from config without requiring PyYAML at dashboard runtime."""
+    weights = {}
+    panel = []
+    minimum = 50
+    section = None
+    subsection = None
+    for raw in Path(config_path).read_text().splitlines():
+        code = raw.split("#", 1)[0].rstrip()
+        if not code.strip():
+            continue
+        indent = len(code) - len(code.lstrip(" "))
+        line = code.strip()
+        if indent == 0 and line.endswith(":"):
+            section = line[:-1].strip()
+            subsection = None
+            continue
+        if section != "analytics":
+            continue
+        if indent == 2 and line.endswith(":"):
+            subsection = line[:-1].strip()
+            continue
+        if subsection == "source_weights" and indent >= 4 and ":" in line:
+            key, value = line.split(":", 1)
+            weights[key.strip()] = float(value.strip())
+        elif subsection == "core_source_panel" and line.startswith("- "):
+            panel.append(line[2:].strip())
+        elif line.startswith("minimum_source_samples:"):
+            minimum = int(float(line.split(":", 1)[1].strip()))
+            subsection = None
+    if not panel:
+        panel = list(weights)
+    return weights, panel, minimum
+
+
+def _headline_view(**overrides) -> dict:
+    view = {
+        "date": None,
+        "score": None,
+        "n_docs": None,
+        "source_coverage": None,
+        "coverage_sufficient": None,
+        "sample_sufficient": None,
+        "ci_low": None,
+        "ci_high": None,
+        "withheld": True,
+        "reason": "No composite row is available.",
+        "quality_available": False,
+    }
+    view.update(overrides)
+    return view
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def load_headline(path: str) -> dict:
+    """Latest smoothed score, hidden when stored coverage or sample gates fail.
+
+    Snapshots that predate index_quality still return the stored smoothed value.
+    """
+    rows = _query(
+        path,
+        "SELECT date, smoothed_index, n_docs FROM composite_index ORDER BY date DESC LIMIT 1",
+    )
+    quality_cols = _table_columns(path, "index_quality")
+    if not rows:
+        return _headline_view(quality_available=bool(quality_cols))
+    row = rows[0]
+    score = row["smoothed_index"]
+    score = float(score) if score is not None and pd.notna(score) else None
+    view = _headline_view(
+        date=row["date"],
+        score=score,
+        n_docs=row["n_docs"],
+        withheld=score is None,
+        reason=None if score is not None else "No smoothed score is available for the latest day.",
+        quality_available=False,
+    )
+    needed = {"source_coverage", "coverage_sufficient", "sample_sufficient"}
+    if not needed.issubset(quality_cols):
+        return view
+    select_ci = ", ci_low, ci_high" if {"ci_low", "ci_high"}.issubset(quality_cols) else ""
+    quality = _query(
+        path,
+        "SELECT source_coverage, coverage_sufficient, sample_sufficient"
+        f"{select_ci} FROM index_quality WHERE date = ?",
+        (row["date"],),
+    )
+    view["quality_available"] = True
+    if quality:
+        item = quality[0]
+        view["source_coverage"] = item["source_coverage"]
+        if item["coverage_sufficient"] is not None:
+            view["coverage_sufficient"] = bool(item["coverage_sufficient"])
+        if item["sample_sufficient"] is not None:
+            view["sample_sufficient"] = bool(item["sample_sufficient"])
+        if select_ci:
+            view["ci_low"] = item["ci_low"]
+            view["ci_high"] = item["ci_high"]
+    coverage_ok = view["coverage_sufficient"] is True
+    sample_ok = view["sample_sufficient"] is True
+    if coverage_ok and sample_ok and score is not None:
+        view["withheld"] = False
+        view["reason"] = None
+        return view
+    view["score"] = None
+    view["withheld"] = True
+    if score is None:
+        view["reason"] = "No smoothed score is available for the latest day."
+    elif not coverage_ok:
+        view["reason"] = "Core-source coverage is below the configured minimum."
+    else:
+        view["reason"] = "The sample is below the configured minimum."
+    return view
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def load_movement(path: str, config_path: str = CONFIG_PATH):
+    """Latest fixed-panel change, split into within-source and composition parts."""
+    from analytics.source_behavior import attribute_index_movement
+
+    weights, panel, minimum = _dashboard_panel_settings(config_path)
+    rows = _query(
+        path,
+        """SELECT date, source,
+                  SUM(n_docs) AS n_docs,
+                  CASE WHEN SUM(n_docs) > 0
+                       THEN SUM(mean_score * n_docs) / SUM(n_docs)
+                       ELSE AVG(mean_score)
+                  END AS mean_score
+           FROM daily_index
+           WHERE mean_score IS NOT NULL
+           GROUP BY date, source""",
+    )
+    if not rows:
+        return None
+    frame = pd.DataFrame(rows)
+    if panel:
+        frame = frame[frame["source"].isin(set(panel))]
+    frame = frame[pd.to_numeric(frame["n_docs"], errors="coerce").fillna(0) >= minimum]
+    if frame.empty:
+        return None
+    if not weights:
+        weights = {source: 1.0 for source in sorted(set(frame["source"]))}
+    movement = attribute_index_movement(frame, weights)
+    if movement.empty:
+        return None
+    last = movement.iloc[-1]
+    score_effect = last["score_effect"]
+    composition = last["composition_effect"]
+    current = last["index"]
+    previous = last["previous_index"]
+    total = None
+    if current is not None and previous is not None and pd.notna(current) and pd.notna(previous):
+        total = float(current) - float(previous)
+    return {
+        "date": last["date"],
+        "previous_date": last["previous_date"],
+        "score_effect": None if score_effect is None or pd.isna(score_effect) else float(score_effect),
+        "composition_effect": None if composition is None or pd.isna(composition) else float(composition),
+        "total_delta": total,
+        "entered": list(last["entered"]),
+        "exited": list(last["exited"]),
+    }
+
+
+def movement_caption(movement: dict) -> str:
+    if not movement or movement.get("score_effect") is None or movement.get("composition_effect") is None:
+        return "Score movement cannot be split until two dated panel observations exist."
+    total = movement.get("total_delta")
+    if total is None:
+        total = movement["score_effect"] + movement["composition_effect"]
+    return (
+        f"Since {movement['previous_date']}, fixed-panel source means moved {total:+.2f}. "
+        f"Change within sources present on both days: {movement['score_effect']:+.2f}. "
+        f"Source-composition change: {movement['composition_effect']:+.2f}."
+    )
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def load_source_intervals(path: str) -> pd.DataFrame:
+    needed = {"date", "source", "ci_low", "ci_high"}
+    if not needed.issubset(_table_columns(path, "source_interval")):
+        return pd.DataFrame(columns=["date", "source", "ci_low", "ci_high"])
+    return pd.DataFrame(_query(
+        path,
+        "SELECT date, source, ci_low, ci_high FROM source_interval",
+    ))
+
+
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
 def load_platform_trends(path: str) -> pd.DataFrame:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=180)).date().isoformat()
@@ -395,6 +591,20 @@ def chart_timeline(df: pd.DataFrame) -> go.Figure:
                 hovertemplate="%{x|%d %b %Y}<br>" + name +
                     ": %{y:.1f}<br>Documents: %{customdata:,.0f}<extra></extra>",
             ))
+    if {"ci_low", "ci_high"}.issubset(df.columns):
+        for i, (_, group) in enumerate(runs.groupby("run")):
+            fig.add_trace(go.Scatter(
+                x=group["date"], y=group["ci_low"], mode="lines",
+                line=dict(width=0), showlegend=False, hoverinfo="skip",
+                connectgaps=False, legendgroup="ci",
+            ))
+            fig.add_trace(go.Scatter(
+                x=group["date"], y=group["ci_high"], mode="lines",
+                line=dict(width=0), fill="tonexty",
+                fillcolor="rgba(36,100,154,0.15)",
+                name="Sampling interval", legendgroup="ci", showlegend=i == 0,
+                hoverinfo="skip", connectgaps=False,
+            ))
     flags = df[df["anomaly_flag"].fillna(0).astype(bool)]
     if not flags.empty:
         fig.add_trace(go.Scatter(
@@ -417,12 +627,27 @@ def chart_timeline(df: pd.DataFrame) -> go.Figure:
 
 def chart_sources(df: pd.DataFrame) -> go.Figure:
     ordered = df.sort_values("mean_score").copy()
+    extra = {}
+    if {"ci_low", "ci_high"}.issubset(ordered.columns):
+        center = pd.to_numeric(ordered["mean_score"], errors="coerce")
+        low = pd.to_numeric(ordered["ci_low"], errors="coerce")
+        high = pd.to_numeric(ordered["ci_high"], errors="coerce")
+        extra["error_x"] = dict(
+            type="data",
+            symmetric=False,
+            array=(high - center).tolist(),
+            arrayminus=(center - low).tolist(),
+            color=P["muted"],
+            thickness=1.2,
+            width=0,
+        )
     fig = go.Figure(go.Scatter(
         x=ordered["mean_score"], y=ordered["source"].str.replace("_", " ").str.title(),
         mode="markers", marker=dict(color=P["blue"], size=10),
         customdata=ordered[["date", "n_docs"]],
         hovertemplate="%{y}<br>Mean score: %{x:.1f}<br>Observation: %{customdata[0]}"
                       "<br>Documents: %{customdata[1]:,.0f}<extra></extra>",
+        **extra,
     ))
     fig.update_layout(
         **PLOTLY_BASE, height=max(280, 32 * len(ordered) + 100),
@@ -462,7 +687,8 @@ def main():
                 'signals in sampled public web text. Explore the index, its coverage, '
                 'and the assumptions behind it.</p>', unsafe_allow_html=True)
 
-    score, total_docs, coverage = None, None, {}
+    headline, total_docs, coverage = None, None, {}
+    movement = None
     src_df = pd.DataFrame()
     try:
         database_path = _resolve_database_path()
@@ -472,17 +698,18 @@ def main():
 
     if database_path is not None:
         for label, loader, key, critical in (
-            ("Current Internet Aliveness Index", load_score, "score", True),
+            ("Current Internet Aliveness Index", load_headline, "headline", True),
             ("Source scores", load_sources, "sources", False),
             ("Document count", load_total_docs, "count", False),
             ("Coverage metadata", load_coverage, "coverage", False),
         ):
             try:
                 value = loader(database_path)
-                if key == "score":
-                    if not pd.notna(value) or not 0 <= value <= 100:
+                if key == "headline":
+                    candidate = value.get("score")
+                    if candidate is not None and (not pd.notna(candidate) or not 0 <= float(candidate) <= 100):
                         raise ValueError("current score is not a finite value within 0–100")
-                    score = value
+                    headline = value
                 elif key == "sources":
                     src_df = value
                 elif key == "count":
@@ -491,20 +718,49 @@ def main():
                     coverage = value
             except Exception as exc:
                 report_load_failure(label, exc, critical=critical)
+        try:
+            movement = load_movement(database_path)
+        except Exception as exc:
+            report_load_failure("Score movement", exc, critical=False)
+        try:
+            intervals = load_source_intervals(database_path)
+            if not src_df.empty and not intervals.empty:
+                src_df = src_df.merge(intervals, on=["source", "date"], how="left")
+        except Exception as exc:
+            report_load_failure("Source intervals", exc, critical=False)
 
+    published = None if headline is None or headline.get("withheld") else headline.get("score")
     left, right = st.columns([1, 2], gap="large")
     with left:
-        value = f'{score:.1f}<small> / 100</small>' if score is not None else '<small>Unavailable</small>'
+        value = f'{published:.1f}<small> / 100</small>' if published is not None else '<small>Unavailable</small>'
         latest = coverage.get("latest") or {}
-        date = latest.get("date")
+        date = (headline or {}).get("date") or latest.get("date")
         st.markdown(
-            '<div class="measure"><div class="measure-label">Internet Aliveness Index</div>'
+            f'<div class="measure"><div class="measure-label">{EXPERIMENTAL_SIGNAL_LABEL}</div>'
             f'<div class="measure-value">{value}</div>'
-            '<div class="measure-note">Latest published smoothed estimate</div></div>',
+            '<div class="measure-note">Smoothed value shown only when coverage and sample minimums are met</div></div>',
             unsafe_allow_html=True,
         )
         if date:
             st.caption(f"Observation date: {date}")
+        if headline and headline.get("reason"):
+            st.caption(headline["reason"])
+        if headline and headline.get("quality_available"):
+            coverage_value = headline.get("source_coverage")
+            coverage_text = f"{float(coverage_value):.0%}" if coverage_value is not None else "unavailable"
+            coverage_gate = "met" if headline.get("coverage_sufficient") else "not met"
+            sample_gate = "met" if headline.get("sample_sufficient") else "not met"
+            st.caption(
+                f"Core-source coverage {coverage_text}. Coverage minimum {coverage_gate}. "
+                f"Sample minimum {sample_gate}."
+            )
+        if published is not None and headline.get("ci_low") is not None and headline.get("ci_high") is not None:
+            st.caption(
+                f"Sampling interval {float(headline['ci_low']):.1f}–{float(headline['ci_high']):.1f}. "
+                "The interval is cluster-bootstrap uncertainty in this sample."
+            )
+        if movement:
+            st.caption(movement_caption(movement))
         st.caption("Higher scores indicate stronger human-like signals under the scoring rules.")
     with right:
         st.markdown('<div class="measure"></div>', unsafe_allow_html=True)
@@ -515,9 +771,10 @@ def main():
             st.caption(f"Corpus dates: {coverage['first_date']} to {coverage['last_date']}")
         if latest.get("n_docs") is not None:
             st.caption(f"Latest composite sample: {latest['n_docs']:,} documents")
-        st.markdown('<p class="scope">This score is an observational measure, not a calibrated '
-                    'probability of AI authorship. It does not estimate the percentage of '
-                    'the internet that is synthetic.</p>', unsafe_allow_html=True)
+        st.markdown('<p class="scope">This score is an experimental synthetic-content signal, not a calibrated '
+                    'probability of AI authorship. It does not estimate how much of '
+                    'the public web was written by a model. A missing headline means the coverage '
+                    'or sample minimum was not met.</p>', unsafe_allow_html=True)
     st.caption("Provenance: published Hugging Face SQLite snapshot. Refresh checks are cached for five minutes; "
                "a previously validated snapshot may be used when the upstream service is unavailable. "
                "Observation dates describe the corpus, not the download time.")
@@ -566,11 +823,18 @@ def main():
     else:
         st.plotly_chart(chart_sources(src_df), width="stretch", config={"displaylogo": False})
         with st.expander("Inspect source observations"):
-            st.dataframe(src_df[["source", "date", "mean_score", "n_docs"]]
-                         .rename(columns={"source": "Source", "date": "Latest observation",
-                                          "mean_score": "Mean document score", "n_docs": "Documents"}),
-                         hide_index=True, width="stretch")
-        st.caption("Source: daily_index in the same SQLite snapshot. Sample size and genre affect comparability. "
+            table = src_df.rename(columns={
+                "source": "Source", "date": "Latest observation",
+                "mean_score": "Mean document score", "n_docs": "Documents",
+                "ci_low": "Interval low", "ci_high": "Interval high",
+            })
+            columns = ["Source", "Latest observation", "Mean document score", "Documents"]
+            if "Interval low" in table.columns:
+                columns.extend(["Interval low", "Interval high"])
+            st.dataframe(table[columns], hide_index=True, width="stretch")
+        st.caption("Source: daily_index in the same SQLite snapshot. Horizontal bars, when present, "
+                   "are source sampling intervals and require at least two clusters. "
+                   "Sample size and genre affect comparability. "
                    "A source represented here may have historical data without current collection.")
 
     section("Methodology & interpretation")
@@ -589,19 +853,26 @@ def main():
                  "and requires every panel source to meet the sample threshold.")
         st.write("CC harvests use a separate 50000-document pipeline quota and a 10000-row per-crawl cap. Completion requires published gold confirmation at 80% of target; attempts wait 12 hours for confirmation. The backfill requeues exactly 65 empty crawls. Progress never resets automatically by default.")
         st.write("The current score and source summaries above retain the published SQLite daily means "
-                 "and smoothed composite; they use different aggregation rules from these local timelines.")
-        st.write("Seven classical signals form the default score. These are heuristic features rather than "
-                 "independent tests of authorship. Temporal burstiness receives a neutral value when "
-                 "timestamps are absent; the current dataframe scorer does not pass timestamp sequences.")
-        st.dataframe(pd.DataFrame({"Classical signal": ["Type-token ratio", "Shannon entropy",
-                     "Sentence length variance", "Bigram repetition", "Temporal burstiness",
-                     "MTLD lexical diversity", "Zipf alignment"],
-                     "Default weight": ["18%", "15%", "15%", "15%", "15%", "12%", "10%"]}),
-                     hide_index=True, width="stretch")
-        st.write("Optional local DistilGPT-2 perplexity scoring is enabled by ENABLE_PERPLEXITY=1. "
-                 "It receives 15% of the score and scales the classical weights proportionally. "
-                 "Common Crawl runs disable it to limit runtime. The aggregate snapshot does not identify "
-                 "which scoring mode produced every observation.")
+                 "and smoothed composite; they use different aggregation rules from these local timelines. "
+                 "The headline number is hidden when core-source coverage or the sample minimum is missed.")
+        st.write("Six configured signals form the provisional headline. These are heuristic features rather than "
+                 "independent tests of authorship. Hapax ratio, Yule's K, windowed lexical diversity and "
+                 "type-token ratio are still stored for calibration. They are omitted from the headline so "
+                 "vocabulary richness is not counted more than once alongside MTLD. Burstiness is a source-level "
+                 "timing summary and is not part of the document score. Perplexity is not part of the headline composite.")
+        st.dataframe(pd.DataFrame({
+            "Signal": [
+                "MTLD lexical diversity", "Sentence length variance", "Bigram repetition",
+                "Zipf alignment", "Compression ratio", "Character entropy",
+            ],
+            "Provisional weight": ["25%", "18%", "17%", "12%", "14%", "14%"],
+        }), hide_index=True, width="stretch")
+        st.write("Weights and the maps from raw features to sub-scores are provisional. "
+                 "A labeled calibration file can replace the scaling constants. "
+                 "Confidence intervals are omitted when a source has fewer than two clusters. "
+                 "An interval describes resampling uncertainty in the observed sample. "
+                 "The movement line separates a change within sources present on both days "
+                 "from a source-composition change.")
     with limits:
         st.markdown("### Scope & limitations")
         st.markdown("- **A collected sample, not a census.** Coverage depends on collector access, "
@@ -610,13 +881,15 @@ def main():
                     "change these signals in human and generated text alike. Short texts score lower, so length "
                     "confounding remains even after token thresholds. Scores are observational, not calibrated "
                     "AI probabilities. No calibrated error rates "
-                    "for AI authorship are supplied by this dashboard; bootstrap intervals describe sampling uncertainty in medians.\n"
+                    "for AI authorship are supplied by this dashboard. Bootstrap intervals describe sampling uncertainty, "
+                    "in medians for the local timelines and in cluster resamples for the headline.\n"
                     "- **Historical samples differ.** Archive and crawl dates mix with recent platform "
-                    "observations. Changing source composition and scoring modes limit comparisons over time.\n"
+                    "observations. Changing source composition and scoring modes limit comparisons over time. "
+                    "The movement line separates those composition changes from movement within a fixed source set.\n"
                     "- **Access gaps matter.** Twitter/X and Substack collectors are blocked; their absence "
                     "does not imply an absence of activity. Bluesky collection uses topic searches, not a full firehose.")
         st.write("Consult the collection and scoring code before interpreting a shift as a change "
-                 "in synthetic content. Statistical flags identify unusual scores and do not explain their cause.")
+                 "in who wrote the sampled text. Statistical flags identify unusual scores and do not explain their cause.")
 
     section("Data & code")
     st.markdown(
