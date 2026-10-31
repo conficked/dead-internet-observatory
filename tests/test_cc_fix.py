@@ -130,6 +130,7 @@ def test_pipeline_refreshes_status_when_every_cc_candidate_is_capped(tmp_path, m
     db = tmp_path/'observatory.db'
     with sqlite3.connect(db) as conn:
         conn.execute('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)')
+        conn.execute('CREATE TABLE ingested_docs (doc_id TEXT PRIMARY KEY)')
     b.engine = SimpleNamespace(_conn=lambda: sqlite3.connect(db))
     b.run()
     fake_detector.score_dataframe.assert_not_called()

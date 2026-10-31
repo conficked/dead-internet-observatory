@@ -123,14 +123,15 @@ class AlivenessIndexEngine:
     @staticmethod
     def _valid_dated_docs(df):
         df = df.copy()
-        dates = pd.to_datetime(df.get("created_dt", pd.Series(pd.NaT, index=df.index)),
-                               errors="coerce", utc=True, format="mixed")
-        missing = dates.isna()
-        future = dates > pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=1)
+        raw_dates = df.get("created_dt", pd.Series(pd.NaT, index=df.index))
+        dates = pd.to_datetime(raw_dates, errors="coerce", utc=True, format="mixed")
+        missing = raw_dates.isna()
+        invalid = dates.isna() & ~missing
+        future = dates > pd.Timestamp(datetime.now(timezone.utc))
         logging.getLogger(__name__).info(
-            "[INDEX] Dropped %d null created_dt rows and %d future created_dt rows",
-            int(missing.sum()), int(future.sum()))
-        df = df.loc[~(missing | future)].copy()
+            "[INDEX] Dropped %d null created_dt rows, %d invalid created_dt rows and %d future created_dt rows",
+            int(missing.sum()), int(invalid.sum()), int(future.sum()))
+        df = df.loc[~(missing | invalid | future)].copy()
         df["date"] = dates.loc[df.index].dt.strftime("%Y-%m-%d")
         df["aliveness_score"] = pd.to_numeric(df["aliveness_score"], errors="coerce")
         return df.loc[np.isfinite(df["aliveness_score"])].copy()
@@ -229,6 +230,9 @@ class AlivenessIndexEngine:
                     continue
                 conn.execute("INSERT OR REPLACE INTO domain_scores VALUES (?,?,?,?,?)",
                              (date, domain, rows[0][1], round(float(np.mean([r[0] for r in rows])), 3), len(rows)))
+            conn.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('total_indexed_count', ?)",
+                (str(conn.execute("SELECT COUNT(*) FROM ingested_docs").fetchone()[0]),))
         legacy_count = len(affected.intersection(legacy))
         if legacy_count:
             logging.getLogger(__name__).warning(
@@ -347,9 +351,19 @@ class AlivenessIndexEngine:
     def get_current_score(self) -> Optional[float]:
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT smoothed_index FROM composite_index ORDER BY date DESC LIMIT 1"
+                "SELECT smoothed_index FROM composite_index WHERE date <= ? ORDER BY date DESC LIMIT 1",
+                (datetime.now(timezone.utc).date().isoformat(),)
             ).fetchone()
         return float(row["smoothed_index"]) if row else None
+
+    def reconcile_future_dates(self):
+        """Report existing future-dated rows without changing stored observations."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        with self._conn() as conn:
+            return {table: conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE date > ?", (today,)
+            ).fetchone()[0] for table in (
+                "ingested_docs", "daily_index", "composite_index", "domain_scores")}
 
     def get_total_docs(self) -> int:
         with self._conn() as conn:
