@@ -76,8 +76,24 @@ class DatabasePathTests(unittest.TestCase):
             download.assert_called_once_with(
                 repo_id=app.DATASET_REPO,
                 repo_type="dataset",
-                filename="observatory.db",
+                filename="dashboard.db",
                 revision="dataset-revision",
+            )
+            self.assertEqual(path, database)
+
+    def test_database_path_falls_back_to_full_snapshot(self):
+        app._database_path.clear()
+        with tempfile.TemporaryDirectory() as directory:
+            database = self._database(directory)
+            with patch.object(
+                app, "hf_hub_download",
+                side_effect=[app.EntryNotFoundError("no dashboard.db"), database],
+            ) as download:
+                path = app._database_path("dataset-revision")
+
+            self.assertEqual(
+                [call.kwargs["filename"] for call in download.call_args_list],
+                ["dashboard.db", "observatory.db"],
             )
             self.assertEqual(path, database)
 
