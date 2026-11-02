@@ -11,6 +11,7 @@ Usage:
 import argparse
 import os
 import shutil
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -24,7 +25,38 @@ STATE_FILES = (
     "gold/scored.parquet",
     "observatory.db",
 )
+DASHBOARD_DB = "dashboard.db"
+
+# observatory.db carries the document ledger and per-domain scores, which makes it
+# grow into the hundreds of megabytes. The dashboard only reads the aggregate
+# tables below, so it gets a compact copy and never downloads the full snapshot.
+DASHBOARD_TABLES = (
+    "composite_index",
+    "daily_index",
+    "index_quality",
+    "source_interval",
+    "meta",
+)
 RESTORE_RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def export_dashboard_db(source: Path, destination: Path) -> Path:
+    """Copy the dashboard's aggregate tables into a compact SQLite file."""
+    if destination.exists():
+        destination.unlink()
+    with sqlite3.connect(str(destination)) as out:
+        out.execute("ATTACH DATABASE ? AS src", (str(source),))
+        for table in DASHBOARD_TABLES:
+            row = out.execute(
+                "SELECT sql FROM src.sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if row is None:
+                continue
+            out.execute(row[0])
+            out.execute(f'INSERT INTO "{table}" SELECT * FROM src."{table}"')
+        out.commit()
+    return destination
 
 
 def is_rate_limit(exc):
@@ -127,7 +159,14 @@ def push(repo_id: str, data_root: Path, token: str):
     parquet_files = sorted(data_root.glob("silver/**/*.parquet"))
     parquet_files.extend(sorted(data_root.glob("gold/**/*.parquet")))
     db_path = data_root / "observatory.db"
-    uploaded = len(parquet_files) + int(db_path.exists())
+    dashboard_path = data_root / DASHBOARD_DB
+    if db_path.exists():
+        export_dashboard_db(db_path, dashboard_path)
+        print(
+            f"[HF] Dashboard snapshot: {dashboard_path.stat().st_size / 1e6:.1f} MB "
+            f"(from {db_path.stat().st_size / 1e6:.0f} MB)"
+        )
+    uploaded = len(parquet_files) + int(db_path.exists()) + int(dashboard_path.exists())
     if not uploaded:
         print("[HF] Error: no Parquet datasets or observatory.db found")
         sys.exit(1)
@@ -142,7 +181,7 @@ def push(repo_id: str, data_root: Path, token: str):
                 repo_id=repo_id,
                 repo_type="dataset",
                 token=token,
-                allow_patterns=["*.parquet", "observatory.db"],
+                allow_patterns=["*.parquet", "observatory.db", DASHBOARD_DB],
                 commit_message="update observatory dataset snapshot",
             ),
         )

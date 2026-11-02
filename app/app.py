@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import EntryNotFoundError
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -46,6 +47,15 @@ REQUIRED_DATABASE_SCHEMA = {
 }
 
 EXPERIMENTAL_SIGNAL_LABEL = "Experimental synthetic-content signal"
+
+# The dashboard needs a handful of small tables; observatory.db also carries the
+# document ledger and domain scores, which makes the full snapshot hundreds of
+# megabytes. Prefer the slim export and fall back for older snapshots.
+DATASET_FILENAMES = ("dashboard.db", "observatory.db")
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 @st.cache_resource()
@@ -79,12 +89,22 @@ def _dataset_revision() -> str:
 
 @st.cache_resource(ttl=CACHE_TTL_SECONDS)
 def _database_path(revision: str) -> str:
-    path = hf_hub_download(
-        repo_id=DATASET_REPO,
-        repo_type="dataset",
-        filename="observatory.db",
-        revision=revision,
-    )
+    path = None
+    for filename in DATASET_FILENAMES:
+        try:
+            path = hf_hub_download(
+                repo_id=DATASET_REPO,
+                repo_type="dataset",
+                filename=filename,
+                revision=revision,
+            )
+            break
+        except EntryNotFoundError:
+            continue
+    if path is None:
+        raise FileNotFoundError(
+            f"dataset revision {revision[:12]} has none of {', '.join(DATASET_FILENAMES)}"
+        )
     _validate_database(path)
     state = _database_path_state()
     with state["lock"]:
@@ -295,9 +315,9 @@ def load_timeline(path: str, days: int = None) -> pd.DataFrame:
         """SELECT date, aliveness_index, smoothed_index, n_docs,
                   anomaly_flag, anomaly_reason
            FROM composite_index
-           WHERE date >= ?
+           WHERE date >= ? AND date <= ?
            ORDER BY date ASC""",
-        (cutoff,),
+        (cutoff, _today()),
     )
     df = pd.DataFrame(data)
     if not df.empty:
@@ -325,9 +345,11 @@ def load_sources(path: str) -> pd.DataFrame:
                  FROM daily_index latest
                  WHERE latest.source = daily_index.source
                    AND latest.mean_score IS NOT NULL
+                   AND latest.date <= ?
              )
            GROUP BY source, date
-           ORDER BY source"""
+           ORDER BY source""",
+        (_today(),),
     ))
 
 
@@ -416,7 +438,9 @@ def load_headline(path: str) -> dict:
     """
     rows = _query(
         path,
-        "SELECT date, smoothed_index, n_docs FROM composite_index ORDER BY date DESC LIMIT 1",
+        "SELECT date, smoothed_index, n_docs FROM composite_index"
+        " WHERE date <= ? ORDER BY date DESC LIMIT 1",
+        (_today(),),
     )
     quality_cols = _table_columns(path, "index_quality")
     if not rows:
@@ -485,8 +509,9 @@ def load_movement(path: str, config_path: str = CONFIG_PATH):
                        ELSE AVG(mean_score)
                   END AS mean_score
            FROM daily_index
-           WHERE mean_score IS NOT NULL
+           WHERE mean_score IS NOT NULL AND date <= ?
            GROUP BY date, source""",
+        (_today(),),
     )
     if not rows:
         return None
@@ -540,7 +565,8 @@ def load_source_intervals(path: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["date", "source", "ci_low", "ci_high"])
     return pd.DataFrame(_query(
         path,
-        "SELECT date, source, ci_low, ci_high FROM source_interval",
+        "SELECT date, source, ci_low, ci_high FROM source_interval WHERE date <= ?",
+        (_today(),),
     ))
 
 
@@ -552,9 +578,9 @@ def load_platform_trends(path: str) -> pd.DataFrame:
         """SELECT date, source, aliveness_index
            FROM daily_index
            WHERE source IN ('reddit', 'hackernews', 'bluesky', 'youtube', 'fourchan', 'steam')
-             AND date >= ?
+             AND date >= ? AND date <= ?
            ORDER BY date ASC""",
-        (cutoff,),
+        (cutoff, _today()),
     )
     df = pd.DataFrame(data)
     if not df.empty:
@@ -566,9 +592,10 @@ def load_platform_trends(path: str) -> pd.DataFrame:
 def load_coverage(path: str) -> dict:
     rows = _query(path, """SELECT MIN(date) AS first_date, MAX(date) AS last_date,
                                    COUNT(DISTINCT source) AS source_count
-                            FROM daily_index""")
+                            FROM daily_index WHERE date <= ?""", (_today(),))
     latest = _query(path, """SELECT date, n_docs FROM composite_index
-                              ORDER BY date DESC LIMIT 1""")
+                              WHERE date <= ?
+                              ORDER BY date DESC LIMIT 1""", (_today(),))
     return {**rows[0], "latest": latest[0] if latest else None}
 
 
