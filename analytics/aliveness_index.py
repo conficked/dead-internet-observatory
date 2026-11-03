@@ -362,6 +362,18 @@ class AlivenessIndexEngine:
         daily = pd.DataFrame([dict(row) for row in rows])
         clusters = pd.DataFrame([dict(row) for row in cluster_rows]) if cluster_rows else pd.DataFrame(
             columns=["date", "source", "category", "cluster_id", "scoring_version", "score_sum", "n"])
+        # Collectors occasionally stamp a record ahead of today (a 2027-09-30 mastodon
+        # row reached composite_index and index_quality). A future date is never a
+        # completion of the observation window, so it must not enter the headline.
+        horizon = datetime.now(timezone.utc).date().isoformat()
+        future = sorted(set(daily["date"].astype(str)) - set(
+            daily.loc[daily["date"].astype(str) <= horizon, "date"].astype(str)))
+        if future:
+            logging.getLogger("aliveness_index").warning(
+                "Skipping future-dated daily groups: %s", ", ".join(future[:5]))
+        daily = daily[daily["date"].astype(str) <= horizon]
+        if clusters is not None and not clusters.empty:
+            clusters = clusters[clusters["date"].astype(str) <= horizon]
         current = self.scoring_version
         source_rows = []
         noncurrent_by_date = {}

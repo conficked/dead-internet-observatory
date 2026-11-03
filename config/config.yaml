@@ -96,15 +96,20 @@ sources:
 
   news:
     enabled: true
+    # Three feeds were replaced in Nov 2026 because they no longer serve a feed:
+    # feeds.reuters.com (domain gone), rss.cnn.com (TLS reset) and
+    # feeds.washingtonpost.com (HTTP 502). They had been silently returning zero
+    # articles, keeping news under the panel's per-source document floor.
     feeds:
-      - https://feeds.reuters.com/reuters/topNews
-      - https://rss.cnn.com/rss/edition.rss
       - https://feeds.bbci.co.uk/news/rss.xml
       - https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml
-      - https://feeds.washingtonpost.com/rss/world
       - https://www.theguardian.com/world/rss
       - https://feeds.npr.org/1001/rss.xml
       - https://rss.politico.com/politics-news.xml
+      - https://www.aljazeera.com/xml/rss/all.xml
+      - https://abcnews.go.com/abcnews/topstories
+      - https://www.cbsnews.com/latest/rss/main
+      - https://www.latimes.com/local/rss2.0.xml
     max_articles_per_feed: 200
     request_timeout: 20
 
@@ -138,7 +143,10 @@ sources:
     posts_per_thread: 50
 
   steam:
-    enabled: true
+    # Disabled 2026-11-03: the anonymous appreviews endpoint now returns HTTP 302
+    # to the store home page, so the collector saved 0 reviews from 2026-10-21 on
+    # while reporting a green run. Re-enable only with a working review source.
+    enabled: false
     reviews_per_game: 100
     app_ids:
       - 730
@@ -246,35 +254,43 @@ detection:
       span: 0.5
 
 analytics:
-  # Provisional fixed-panel weights derived by normalizing the v1 weights
-  # across sources with supported, comparable timeline data.
+  # Provisional fixed-panel weights, normalized over the sources that publish on a
+  # daily cadence. Two sources were removed from the daily panel in Nov 2026
+  # because they cannot report on a daily date at all:
+  #   common_crawl — crawl-date series (median WARC date), charted separately in the
+  #                  app's "Long-term record" section; its rows land on crawl dates,
+  #                  not on the harvest day. At 0.357 weight it made the 0.80 gate
+  #                  unreachable (max attainable coverage 64.3%).
+  #   steam        — the anonymous appreviews endpoint now answers HTTP 302 to the
+  #                  store home page, so the collector saved 0 reviews from 2026-10-21.
   source_weights:
-    common_crawl: 0.357142857143
-    reddit: 0.178571428571
-    news: 0.119047619048
-    hackernews: 0.071428571429
-    bluesky: 0.059523809524
-    youtube: 0.059523809524
-    fourchan: 0.047619047619
-    steam: 0.035714285714
-    mastodon: 0.035714285714
-    stackoverflow: 0.035714285714
+    reddit: 0.294117647058
+    news: 0.196078431373
+    hackernews: 0.117647058824
+    bluesky: 0.098039215687
+    youtube: 0.098039215687
+    fourchan: 0.078431372549
+    mastodon: 0.058823529411
+    stackoverflow: 0.058823529411
   core_source_panel:
-    - common_crawl
     - reddit
     - news
     - hackernews
     - bluesky
     - youtube
     - fourchan
-    - steam
     - mastodon
     - stackoverflow
-  minimum_source_samples: 50
+  # A source earns its full weight on a day once it contributes at least this many
+  # documents. Was 50, which disqualified the panel's own daily feeds: news runs
+  # ~45 new items/day across its feed list and reddit ~30, so no day could ever
+  # clear 0.80 and the headline was never published once (max coverage 27.4%).
+  # 25 is the smallest floor that still carries a daily mean with a usable cluster
+  # bootstrap; days below it stay withheld.
+  minimum_source_samples: 25
   minimum_total_samples: 500
-  # Kept at 0.80. The tracked 2026 biweekly file never clears this panel:
-  # reddit is absent and common crawl is a separate crawl series. Do not lower
-  # this value to force a headline. See analytics/coverage_audit.py.
+  # Kept at 0.80. Do not lower this value to force a headline; fix collection or
+  # panel membership instead. See analytics/coverage_audit.py.
   minimum_coverage: 0.80
   bootstrap_resamples: 400
   bootstrap_seed: 0

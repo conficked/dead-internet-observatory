@@ -103,6 +103,9 @@ class SteamBot(BaseMinion):
     # ── Main ──────────────────────────────────────────────────────────────────
 
     def run(self):
+        if not self.config["sources"]["steam"].get("enabled", True):
+            self.logger.info("Steam minion disabled in config — exiting")
+            return
         self.logger.info(f"Starting — {len(self.app_ids)} games, "
                          f"{self.reviews_per_game} reviews each")
         all_records: list[dict] = []
@@ -119,6 +122,11 @@ class SteamBot(BaseMinion):
             self.save_bronze(all_records, source="steam")
 
         self.logger.info(f"Done — {len(all_records)} reviews saved")
+        # A run that fetched nothing while every request errored is a broken source,
+        # not a quiet day. Fail the job so it cannot report green while dead.
+        if not all_records and self.stats["errors"]:
+            raise SystemExit(
+                f"Steam minion produced 0 reviews with {self.stats['errors']} request errors")
 
 
 if __name__ == "__main__":
