@@ -325,6 +325,29 @@ def test_headline_shows_score_and_interval_when_sufficient(tmp_path):
     assert "Experimental synthetic-content signal" in app.EXPERIMENTAL_SIGNAL_LABEL
 
 
+def test_headline_uses_latest_publishable_score_when_today_is_withheld(tmp_path):
+    path = tmp_path / "observatory.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE composite_index (date TEXT, aliveness_index REAL, smoothed_index REAL, "
+            "n_docs INTEGER, anomaly_flag INTEGER, anomaly_reason TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE index_quality (date TEXT, source_coverage REAL, coverage_sufficient INTEGER, "
+            "sample_sufficient INTEGER, eligible_sources INTEGER, required_sources INTEGER, "
+            "ci_low REAL, ci_high REAL)"
+        )
+        conn.execute("INSERT INTO composite_index VALUES ('2026-11-06', 62, 62.6, 6500, 0, '')")
+        conn.execute("INSERT INTO index_quality VALUES ('2026-11-06', 1.0, 1, 1, 8, 8, 60, 65)")
+        conn.execute("INSERT INTO composite_index VALUES ('2026-11-07', NULL, NULL, 128, 0, '')")
+        conn.execute("INSERT INTO index_quality VALUES ('2026-11-07', 0.0588, 0, 0, 1, 8, NULL, NULL)")
+    view = app.load_headline(str(path))
+    assert view["withheld"] is False
+    assert view["score"] == pytest.approx(62.6)
+    assert view["date"] == "2026-11-06"
+    assert "2026-11-07" in (view["reason"] or "")
+
+
 def test_legacy_snapshot_without_quality_table_still_returns_score(tmp_path):
     path = DatabasePathTests()._database(str(tmp_path))
     with sqlite3.connect(path) as conn:

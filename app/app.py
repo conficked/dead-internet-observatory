@@ -477,12 +477,44 @@ def load_headline(path: str) -> dict:
         if select_ci:
             view["ci_low"] = item["ci_low"]
             view["ci_high"] = item["ci_high"]
+    latest_date = row["date"]
     coverage_ok = view["coverage_sufficient"] is True
     sample_ok = view["sample_sufficient"] is True
     if coverage_ok and sample_ok and score is not None:
         view["withheld"] = False
         view["reason"] = None
         return view
+    # Keep daily quality signals honest while surfacing the most recent
+    # publishable headline when today's row is still incomplete.
+    fallback_rows = _query(
+        path,
+        """SELECT c.date, c.smoothed_index, c.n_docs, q.ci_low, q.ci_high
+           FROM composite_index c
+           JOIN index_quality q ON q.date = c.date
+           WHERE c.date < ?
+             AND c.smoothed_index IS NOT NULL
+             AND q.coverage_sufficient = 1
+             AND q.sample_sufficient = 1
+           ORDER BY c.date DESC
+           LIMIT 1""",
+        (latest_date,),
+    )
+    if fallback_rows:
+        fallback = fallback_rows[0]
+        fallback_score = fallback["smoothed_index"]
+        if fallback_score is not None and pd.notna(fallback_score):
+            view["date"] = fallback["date"]
+            view["score"] = float(fallback_score)
+            view["n_docs"] = fallback["n_docs"]
+            view["ci_low"] = fallback["ci_low"]
+            view["ci_high"] = fallback["ci_high"]
+            view["withheld"] = False
+            view["reason"] = (
+                f"Latest observation {latest_date} is withheld because coverage or sample "
+                f"minimums are not met. Showing the most recent publishable value from "
+                f"{fallback['date']}."
+            )
+            return view
     view["score"] = None
     view["withheld"] = True
     if score is None:

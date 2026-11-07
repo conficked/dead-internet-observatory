@@ -25,28 +25,4 @@ jobs:
 
       - name: Wake Streamlit dashboard
         run: |
-          python - <<'PY'
-          from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-
-          url = "https://deadinternetobservatory.streamlit.app/"
-
-          with sync_playwright() as p:
-              browser = p.chromium.launch()
-              page = browser.new_page()
-              page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-              wake_button = page.get_by_role("button", name="Yes, get this app back up!")
-              try:
-                  wake_button.click(timeout=10000)
-                  print("Clicked Streamlit wake button")
-              except PlaywrightTimeoutError:
-                  print("Wake button not present")
-
-              page.wait_for_timeout(30000)
-              body = page.locator("body").inner_text()
-              if "Document count could not be loaded" in body:
-                  raise RuntimeError("Dashboard rendered without the document count")
-              print("Dashboard data check passed")
-              print(f"Final URL: {page.url}")
-              browser.close()
-          PY
+          python scripts/streamlit_keepalive_check.py
