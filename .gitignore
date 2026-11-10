@@ -28,6 +28,7 @@ data/bronze/
 data/silver/
 data/gold/
 data/observatory.db
+data/prevalence/
 *.zip
 
 # ── Models / caches ──────────────────────────────────────────────────────────

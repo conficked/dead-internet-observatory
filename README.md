@@ -6,8 +6,13 @@ The [Dead Internet Theory](https://en.wikipedia.org/wiki/Dead_Internet_theory) h
 
 This project computes an experimental **Internet Aliveness Index (IAI)** from linguistic signals in collected public web text. The 0–100 score is observational, not a calibrated AI probability or an estimate of the fraction of the internet that is synthetic. Coverage varies by source and collection date.
 
-No paid model APIs or subscriptions. Detection runs locally with one versioned,
-CPU-compatible feature regime across every source.
+No paid model APIs or subscriptions in the pipeline. Detection runs locally with one
+versioned, CPU-compatible feature regime across every source.
+
+The IAI tracks stylometric drift, not AI authorship: it trends down before ChatGPT
+existed. A separate research prototype estimates the share of LLM-consistent text
+directly and passes placebo and coverage checks. See
+[Research: Estimating the AI-Generated Share](#research-estimating-the-ai-generated-share).
 
 ---
 
@@ -132,6 +137,116 @@ and leave-one-domain-out where the file has both classes. Outputs use schema
 The checked-in fixtures are small and are for the tests. They are not a labeled
 corpus. Treat script output from those files as a contract check, not as a
 calibration of the public index.
+
+---
+
+## Research: Estimating the AI-Generated Share
+
+The IAI measures stylometric drift. It does not measure AI authorship. A placebo test
+shows this: on Common Crawl, the IAI falls 0.59 points per year between 2013 and
+2022 (95% interval −0.65 to −0.54), when there was essentially no LLM text, and it
+falls no faster after ChatGPT. Whatever it tracks was already moving before AI
+text existed.
+
+`analytics/prevalence.py` and `scripts/prevalence_prototype.py` are a research
+prototype that asks a narrower question: *what share of a crawl's documents is
+distributionally consistent with LLM output?* It currently covers Common Crawl only.
+Nothing from it feeds the dashboard yet.
+
+### Method
+
+1. **Treat it as a prevalence estimate, not a classifier.** Per-document AI flags
+   fail at low base rates: by Bayes' rule, a detector with 90% recall and a 10% false
+   positive rate is right only about a third of the time when 5% of text is AI.
+   The corpus-level share is recoverable even when single labels are not.
+2. **Mixture model.** Following Liang et al. (2024), *Monitoring AI-Modified Content
+   at Scale*, each document is reduced to the set of vocabulary words in its first
+   150 prose tokens. The fixed window keeps word occurrence from tracking document
+   length. A crawl is modelled as
+   `P(x) = (1 − α) · P_human(x) + α · P_AI(x)`, and α is fitted by maximum
+   likelihood.
+3. **Reference corpora.**
+   - Human: Common Crawl pages from 2019–2021, before ChatGPT.
+   - AI: about 1,350 pages generated through OpenRouter. Each is a new page of
+     the same kind and topic as a real pre-2022 crawl page, one seed page per
+     domain. The reference set comes from three model families (Claude Haiku 5.5,
+     GPT-6 Luna, DeepSeek v4.1 Flash). The test set adds two families the model
+     never sees in fitting (Gemma 4, Qwen 3.8).
+   - Generation cost was under $1. It is a one-off research step, not part of
+     the pipeline.
+4. **Vocabulary.** Lowercase dictionary words only. Proper nouns and concatenated
+   page furniture (`twittershare`, `thisblogthis`) separated the corpora on page
+   chrome instead of authorship. An adjectives-and-adverbs vocabulary was tested
+   and rejected: it badly underestimated unseen model families.
+5. **Bias correction.** The raw estimator reads about 2% on pure human text and
+   underestimates large shares. A Neyman confidence belt, built from simulated
+   mixtures at known shares, maps a raw estimate to a corrected one with an
+   interval. It is calibrated on held-out 2019–2021 text and one half of the AI
+   test documents, and checked on the other half.
+6. **Intervals.** Each of 200 bootstrap replicates:
+   - refits the model on resampled reference corpora,
+   - rebuilds the belt from resampled calibration pools,
+   - re-estimates every crawl from a two-stage resample (pipeline row groups,
+     then documents).
+
+   Crawls are sampled across at least three row groups, so the intervals include
+   batch-to-batch composition differences.
+
+### Validation gates
+
+| Check | Requirement | Result |
+|---|---|---|
+| Placebo, 2022 crawls before ChatGPT | corrected α ≈ 0 | 0.000–0.001, every interval contains 0 |
+| Placebo, 2013–2018 crawls | corrected α ≈ 0 | 0.000–0.013, every interval contains 0 |
+| Interval coverage, 24 placebo crawls | 95% contain 0 | 24 / 24 (document-only bootstrap: 22 / 24) |
+| Interval coverage, 16 real crawls with known AI injected (3%, 8%) | 95% contain truth | 16 / 16 (document-only bootstrap: 12 / 16) |
+| Bias on injected crawls | ≈ 0 | +0.0005 |
+
+### Results (Common Crawl, corrected α, 95% intervals)
+
+| Crawl | AI share |
+|---|---|
+| 2023/06 – 2025/13 | 0–1.8%, all intervals include 0 |
+| 2025/43 | 3.7% [1.2, 5.3] |
+| 2025/47 | 3.5% [0.8, 5.3] |
+| 2026/04 | 3.4% [0.5, 5.3] |
+| 2026/08 | 6.1% [3.2, 8.5] |
+
+Per crawl, the sample can detect a share of about 2–3% or more. LLM-consistent text
+in Common Crawl crosses that threshold in late 2025.
+
+Treat these as lower bounds:
+- Recent crawls also contain pages written years earlier.
+- Model families missing from the reference are underestimated by about 10–15%.
+- Paraphrased or human-edited AI text is largely invisible to a word-occurrence
+  model.
+
+The estimate measures *LLM-consistent text*. It cannot separate AI-assisted from
+AI-generated writing.
+
+### Limits and next steps
+
+- **Social sources** (HN, Bluesky, 4chan, Mastodon and others) have no pre-ChatGPT
+  text in this project. Each needs its own historical human reference (for example
+  HN via Algolia, Reddit and Stack Overflow archives) before the method applies.
+- **AI calibration pool:** about 220 documents per half. More documents and more
+  model families would narrow the intervals and reduce unseen-model bias.
+- **Pooled trend test:** a single trend across all 2023+ crawls would likely
+  detect the 2024–2025 rise before any single crawl does.
+
+### Reproducing
+
+```bash
+.venv/bin/python scripts/prevalence_prototype.py sample           # 12 row groups, first prototype
+.venv/bin/python scripts/prevalence_prototype.py sample-spread    # crawls spread across >=3 row groups
+OPENROUTER_API_KEY=... .venv/bin/python scripts/prevalence_prototype.py generate
+.venv/bin/python scripts/prevalence_prototype.py evaluate         # vocabulary comparison, placebo, injection
+.venv/bin/python scripts/prevalence_prototype.py intervals        # replicate intervals and coverage
+```
+
+Data and reports are written to `data/prevalence/`, which is gitignored. The
+`clean` vocabulary reads `/usr/share/dict/american-english`. The `style` variant
+needs the NLTK `averaged_perceptron_tagger_eng` model in `data/prevalence/nltk_data/`.
 
 ---
 
@@ -384,9 +499,9 @@ dead-internet-observatory/
 ├── minions/           # data collection bots
 ├── pipeline/          # Bronze → Silver → Gold ETL + SQLite index
 ├── detection/         # Statistical AI-content detection engine
-├── analytics/         # Aliveness Index computation + anomaly detection
+├── analytics/         # Aliveness Index, anomaly detection, AI-share prototype (prevalence.py)
 ├── app/               # Streamlit dashboard
-├── scripts/           # Hugging Face publication and migration helpers
+├── scripts/           # Hugging Face publication, analysis and research scripts
 ├── config/            # config.yaml — all tuneable parameters
 └── .github/workflows/ # Autonomous GitHub Actions workflows
 ```
