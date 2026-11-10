@@ -220,8 +220,13 @@ sources:
       - https://marginalrevolution.com/
 
 detection:
-  scoring_version: iai-v2.0.0-provisional
-  min_text_length: 80
+  # v2.1: features are computed on the first max_text_length_for_features chars of
+  # every source, and documents under min_tokens are neither scored nor indexed.
+  scoring_version: iai-v2.1.0-provisional
+  min_text_length: 80              # collector-side character floor (news, CC, wiki, wayback)
+  # Scorer and index floor. Score-vs-length Spearman on short-form sources is 0.78
+  # with no floor, 0.21 at 25 and 0.20 at 50; 50 would drop Bluesky to ~2% of posts.
+  min_tokens: 25
   max_text_length_for_features: 5000
   # Provisional headline weights. They must sum to 1.0.
   # Hapax ratio, Yule's K, windowed lexical diversity and type-token ratio are
@@ -263,21 +268,23 @@ analytics:
   #                  unreachable (max attainable coverage 64.3%).
   #   steam        — the anonymous appreviews endpoint now answers HTTP 302 to the
   #                  store home page, so the collector saved 0 reviews from 2026-10-21.
+  # Two more left the panel with the v2.1 token floor (detection.min_tokens). Their
+  # documents are almost all shorter than 25 tokens, so neither clears
+  # minimum_source_samples, and together they held 39% of the weight:
+  #   reddit       — ~30 docs/day, nearly all under 20 tokens.
+  #   youtube      — ~2% of comments reach 50 tokens.
+  # The remaining weights keep their original ratios (10:6:5:4:3:3 over 31).
   source_weights:
-    reddit: 0.294117647058
-    news: 0.196078431373
-    hackernews: 0.117647058824
-    bluesky: 0.098039215687
-    youtube: 0.098039215687
-    fourchan: 0.078431372549
-    mastodon: 0.058823529411
-    stackoverflow: 0.058823529411
+    news: 0.322580645161
+    hackernews: 0.193548387097
+    bluesky: 0.161290322581
+    fourchan: 0.129032258065
+    mastodon: 0.096774193548
+    stackoverflow: 0.096774193548
   core_source_panel:
-    - reddit
     - news
     - hackernews
     - bluesky
-    - youtube
     - fourchan
     - mastodon
     - stackoverflow

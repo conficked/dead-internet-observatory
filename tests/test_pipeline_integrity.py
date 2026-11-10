@@ -123,7 +123,8 @@ def test_bronze_reports_all_ingestion_outcomes(bronze_pipeline, capsys):
         'files_read': 1, 'lines_read': 7, 'blank_lines': 1,
         'malformed_json_lines': 1, 'normalization_failures': 1,
         'empty_or_unsupported_records': 1, 'duplicate_content_hashes': 1,
-        'accepted_documents': 2, 'rejected_records': 3,
+        'duplicate_doc_ids': 0, 'accepted_documents': 2, 'rejected_records': 3,
+        'future_dated_records': 0,
     }
     output = capsys.readouterr().out
     assert str(path) in output and 'line=3' in output and 'source=news' in output
@@ -672,3 +673,46 @@ def test_candidate_ledger_cleans_tmpdir_on_success_and_failure(tmp_path, monkeyp
     assert len(databases) == 1
     assert not databases[0].parent.exists()
     assert sorted(p.name for p in tmp_path.iterdir()) == ['combined.parquet']
+
+
+def test_bronze_parses_mixed_date_formats_and_falls_back_to_url_date(bronze_pipeline):
+    write_news(bronze_pipeline, '\n'.join(json.dumps(x) for x in [
+        {'text': 'iso', 'url': 'https://a.example/1', 'pub_date': '2026-11-09T06:00:26+00:00'},
+        {'text': 'rss', 'url': 'https://a.example/2', 'pub_date': 'not a date',
+         'feed_published': 'Sun, 08 Nov 2026 10:00:00 +0000'},
+        {'text': 'url', 'url': 'https://www.theguardian.com/world/2026/nov/07/story'},
+        {'text': 'url numeric', 'url': 'https://www.aljazeera.com/news/2026/11/6/story?x=rss'},
+        {'text': 'none', 'url': 'https://abcnews.com/video/137967596/'},
+    ]) + '\n')
+    dates = bronze_pipeline.process_source('news').set_index('text').created_dt
+    assert dates.drop('none').dt.strftime('%Y-%m-%d %H:%M').to_dict() == {
+        'iso': '2026-11-09 06:00', 'rss': '2026-11-08 10:00', 'url': '2026-11-07 00:00',
+        'url numeric': '2026-11-06 00:00'}
+    assert pd.isna(dates['none'])
+
+
+def test_bronze_dedups_refetched_doc_ids_and_nulls_future_dates(bronze_pipeline, monkeypatch):
+    monkeypatch.setattr(bronze, '_make_doc_id', lambda source, identifier, text: identifier)
+    write_news(bronze_pipeline, '\n'.join(json.dumps(x) for x in [
+        {'text': 'first body', 'url': 'same', 'pub_date': '2026-01-01T00:00:00Z'},
+        {'text': 'edited body', 'url': 'same', 'pub_date': '2026-01-01T00:00:00Z'},
+        {'text': 'from the future', 'url': 'later', 'pub_date': '2099-01-01T00:00:00Z'},
+    ]) + '\n')
+    df = bronze_pipeline.process_source('news').set_index('url')
+    assert df.text.to_dict() == {'same': 'first body', 'later': 'from the future'}
+    assert pd.isna(df.loc['later', 'created_dt'])
+    summary = bronze_pipeline.source_summaries['news']
+    assert summary['duplicate_doc_ids'] == 1 and summary['future_dated_records'] == 1
+
+
+def test_candidate_selection_skips_documents_under_the_token_floor(tmp_path):
+    from pipeline.silver_processing import select_silver_candidates
+    long_text = ' '.join(f'word{chr(97 + i % 26)}x' for i in range(60))
+    silver = tmp_path / 'combined.parquet'
+    pd.DataFrame({'doc_id': ['short', 'long', 'capped'], 'source': ['reddit'] * 3,
+                  'crawl_partition': [None] * 3, 'created_dt': ['2026-01-01'] * 3,
+                  'text': ['too short to mean anything', long_text, long_text]}).to_parquet(silver)
+    selected = select_silver_candidates(silver, tmp_path / 'absent.parquet', {}, min_tokens=50)
+    assert sorted(selected.doc_id) == ['capped', 'long']
+    capped = select_silver_candidates(silver, tmp_path / 'absent.parquet', {}, min_tokens=50, max_chars=40)
+    assert capped.empty

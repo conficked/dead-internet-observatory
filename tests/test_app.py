@@ -363,9 +363,9 @@ def test_movement_separates_score_change_from_source_composition(tmp_path):
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE daily_index (date TEXT, source TEXT, mean_score REAL, n_docs INTEGER)")
         conn.executemany("INSERT INTO daily_index VALUES (?,?,?,?)", [
-            ("2026-01-01", "reddit", 40, 100),
+            ("2026-01-01", "hackernews", 40, 100),
             ("2026-01-01", "news", 80, 100),
-            ("2026-01-02", "reddit", 60, 100),
+            ("2026-01-02", "hackernews", 60, 100),
             ("2026-01-02", "news", 80, 100),
         ])
     movement = app.load_movement(str(path))

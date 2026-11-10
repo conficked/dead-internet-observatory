@@ -401,8 +401,9 @@ def test_coverage_audit_does_not_lower_the_configured_threshold():
     assert report["recommended_minimum_coverage"] == pytest.approx(report["configured_minimum_coverage"])
     assert report["configured_minimum_coverage"] == pytest.approx(0.8)
     assert report["biweekly_periods"] == 10
-    assert report["biweekly_periods_meeting_coverage"] == 0
-    assert report["max_biweekly_panel_coverage"] < 0.8
+    # Reddit was the panel source missing from every biweekly bin; it left the panel in v2.1.
+    assert report["biweekly_periods_meeting_coverage"] == 10
+    assert report["panel_sources_absent_from_biweekly"] == []
     assert report["sqlite_daily_dates"] == 0
     assert report["days_losing_headline"] is None
 
@@ -502,3 +503,50 @@ def test_analysis_scripts_match_their_json_contracts(tmp_path):
     drift = outputs["first"]["drift.json"]
     assert drift["movement"]
     assert {"score_effect", "composition_effect"} <= set(drift["movement"][0])
+
+
+def test_scorer_computes_features_on_capped_text(tmp_path):
+    config = yaml.safe_load(write_config(tmp_path).read_text())
+    config["detection"]["max_text_length_for_features"] = 200
+    path = tmp_path / "capped.yaml"
+    path.write_text(yaml.safe_dump(config))
+    head = "Short opener. Then a far longer sentence with many varied words follows here. " * 3
+    tail = "spam spam spam spam spam. " * 200
+    assert score_document(head[:200] + tail, config_path=str(path)) == score_document(
+        head[:200], config_path=str(path))
+
+
+def test_index_drops_documents_under_the_token_floor(tmp_path):
+    config = yaml.safe_load(write_config(tmp_path, source_weights={"reddit": 1.0},
+                                         core_sources=["reddit"]).read_text())
+    config["detection"]["min_tokens"] = 50
+    path = tmp_path / "floor.yaml"
+    path.write_text(yaml.safe_dump(config))
+    engine = AlivenessIndexEngine(str(path))
+    engine.ingest_scored_df(scored_docs("2026-01-01", "reddit", "social", [20, 80]).assign(
+        feat_token_count=[10, 60]))
+    row = engine.get_composite_timeline(days=10000).iloc[0]
+    assert row.n_docs == 1
+    assert row.aliveness_index == pytest.approx(80)
+
+
+def test_current_utc_day_is_not_published(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    today = datetime.now(timezone.utc).date()
+    config = write_config(tmp_path, source_weights={"reddit": 1.0}, core_sources=["reddit"])
+    engine = AlivenessIndexEngine(str(config))
+    engine.ingest_scored_df(pd.concat([
+        scored_docs(str(today - timedelta(days=1)), "reddit", "social", [70]),
+        scored_docs(str(today), "reddit", "social", [10]),
+    ], ignore_index=True))
+    dates = engine.get_composite_timeline(days=10000)["date"].astype(str).tolist()
+    assert dates == [str(today - timedelta(days=1))]
+
+
+def test_only_today_leaves_the_composite_empty(tmp_path):
+    from datetime import datetime, timezone
+    config = write_config(tmp_path, source_weights={"reddit": 1.0}, core_sources=["reddit"])
+    engine = AlivenessIndexEngine(str(config))
+    engine.ingest_scored_df(scored_docs(
+        datetime.now(timezone.utc).date().isoformat(), "reddit", "social", [50]))
+    assert engine.get_composite_timeline(days=10000).empty

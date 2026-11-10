@@ -11,11 +11,12 @@ by uncommenting the marked sections for Databricks/large scale.
 
 import json
 import os
+import re
 import shutil
 import hashlib
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
@@ -78,6 +79,47 @@ def _unix_to_iso(ts) -> Optional[str]:
         return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
     except (TypeError, ValueError, OSError):
         return None
+
+
+_URL_DATE_RE = re.compile(
+    r"/(20\d{2})/(\d{1,2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/(\d{1,2})(?:/|$)",
+    re.IGNORECASE)
+_MONTHS = {name: number for number, name in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+# Collector clocks and naive local timestamps can run a few hours ahead of UTC.
+FUTURE_DATE_TOLERANCE = timedelta(days=1)
+
+
+def parse_created_dt(values: pd.Series) -> pd.Series:
+    """Parse mixed ISO 8601 / RFC 2822 timestamps element by element.
+
+    Without format="mixed", pandas infers one format from the first value and
+    coerces every other format to NaT, which nulled most RSS pubDate values.
+    """
+    return pd.to_datetime(values, errors="coerce", utc=True, format="mixed")
+
+
+def _date_from_url(url: str) -> Optional[str]:
+    match = _URL_DATE_RE.search(url or "")
+    if not match:
+        return None
+    year, month, day = match.groups()
+    month = int(month) if month.isdigit() else _MONTHS[month.lower()]
+    try:
+        return datetime(int(year), month, int(day), tzinfo=timezone.utc).isoformat()
+    except ValueError:
+        return None
+
+
+def _first_parseable_date(*candidates) -> Optional[str]:
+    for value in candidates:
+        if not value:
+            continue
+        parsed = parse_created_dt(pd.Series([value])).iloc[0]
+        if pd.notna(parsed):
+            return parsed.isoformat()
+    return None
 
 
 # ── Record normalisers per source ─────────────────────────────────────────────
@@ -163,7 +205,8 @@ def _normalise_news(raw: Dict, partition: str) -> Optional[Dict]:
         "text": text,
         "text_length": len(text),
         "author": "",
-        "created_dt": raw.get("pub_date") or raw.get("feed_published"),
+        "created_dt": _first_parseable_date(
+            raw.get("pub_date"), raw.get("feed_published"), _date_from_url(url)),
         "crawl_partition": partition,
         "ingested_at": raw.get("_ingested_at", ""),
         "content_hash": raw.get("content_hash") or BaseMinion.content_hash(text),
@@ -608,12 +651,14 @@ class BronzeToSilverPipeline:
         counters = dict.fromkeys([
             "files_read", "lines_read", "blank_lines", "malformed_json_lines",
             "normalization_failures", "empty_or_unsupported_records",
-            "duplicate_content_hashes", "accepted_documents", "rejected_records",
+            "duplicate_content_hashes", "duplicate_doc_ids", "accepted_documents",
+            "rejected_records", "future_dated_records",
         ], 0)
         self.source_summaries[source] = counters
 
         docs: List[Dict] = []
         seen_hashes: set = set()
+        seen_doc_ids: set = set()
 
         for raw, partition, path, line_number in iter_bronze_records(
                 self.bronze_root, source, counters, with_context=True):
@@ -635,12 +680,16 @@ class BronzeToSilverPipeline:
                 results = [result]
             for doc in results:
                 h = doc.get("content_hash") or doc["doc_id"]
-                if h and h not in seen_hashes:
+                if not h or h in seen_hashes:
+                    counters["duplicate_content_hashes"] += 1
+                elif doc["doc_id"] in seen_doc_ids:
+                    # Same item re-fetched after an edit: new body hash, same doc_id.
+                    counters["duplicate_doc_ids"] += 1
+                else:
                     seen_hashes.add(h)
+                    seen_doc_ids.add(doc["doc_id"])
                     docs.append(doc)
                     counters["accepted_documents"] += 1
-                else:
-                    counters["duplicate_content_hashes"] += 1
 
         print(f"[PIPELINE] source={source} " + " ".join(
             f"{key}={value}" for key, value in counters.items()))
@@ -649,7 +698,12 @@ class BronzeToSilverPipeline:
             return pd.DataFrame()
 
         df = pd.DataFrame(docs, columns=SILVER_COLUMNS)
-        df["created_dt"] = pd.to_datetime(df["created_dt"], errors="coerce", utc=True).dt.as_unit("us")
+        df["created_dt"] = parse_created_dt(df["created_dt"]).dt.as_unit("us")
+        future = df["created_dt"] > pd.Timestamp.now(tz="UTC") + FUTURE_DATE_TOLERANCE
+        if future.any():
+            counters["future_dated_records"] = int(future.sum())
+            print(f"  Nulled {int(future.sum()):,} future created_dt values for {source}")
+            df.loc[future, "created_dt"] = pd.NaT
 
         out = getattr(self, "_staging_root", self.silver_root) / f"{source.replace('/', '_')}.parquet"
         with _atomic_parquet_path(out) as temporary:

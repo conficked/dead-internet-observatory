@@ -62,10 +62,9 @@ set. Burstiness and posting regularity live in the source-level behavior layer
 Each source is aggregated once, across categories, before its source weight is
 applied. The headline uses the fixed `core_source_panel`. Missing panel weight is
 reported as coverage and is not renormalized when coverage is below
-`minimum_coverage` (0.80). That threshold stays at 0.80: the tracked 2026 biweekly
-file never clears the full panel, because Reddit is absent from those bins and
-Common Crawl is a separate crawl series. Do not lower the threshold to force a
-headline. `analytics/coverage_audit.py` records the comparison. The local SQLite
+`minimum_coverage` (0.80). That threshold stays at 0.80. Do not lower it to force a
+headline. Reddit and YouTube left the panel in v2.1 because almost none of their
+documents clear the token floor, and Common Crawl is a separate crawl series. `analytics/coverage_audit.py` records the comparison. The local SQLite
 ledger in this checkout has no daily rows, so it does not supply a count of days
 that would lose a headline.
 
@@ -86,8 +85,11 @@ stored on `index_quality`. Per-source intervals are stored on `source_interval`.
 row. Older snapshots that lack `index_quality` still show their stored smoothed
 value in the dashboard, with quality marked unavailable.
 
-Genre, language, source and document length still affect comparability. Token
-thresholds reduce length confounding and do not remove it.
+Genre, language, source and document length still affect comparability. Since
+v2.1, features are computed on the first `max_text_length_for_features` characters
+of every document, and documents under `detection.min_tokens` (25) are neither
+scored nor indexed. Token thresholds reduce length confounding and do not remove it.
+Only completed UTC days enter `composite_index`.
 
 ### Labeled calibration schema
 
