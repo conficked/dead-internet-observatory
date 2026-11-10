@@ -51,7 +51,8 @@ detection:
       invert: true
   max_text_length_for_features: 5000
   min_text_length: 80
-  scoring_version: iai-v2.0.0-provisional
+  min_tokens: 25
+  scoring_version: iai-v2.1.0-provisional
   weights:
     character_entropy: 0.14
     compression_ratio: 0.14

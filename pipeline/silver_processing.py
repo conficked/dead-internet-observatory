@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 import yaml
 
 from analytics.aliveness_index import AlivenessIndexEngine
+from detection.ai_content_detector import scorable_token_count
 from pipeline.id_reconciliation import atomic_parquet, id_database, load_ids, merge_registry
 
 MAX_NEW_DOCS = 6_000
@@ -97,12 +98,15 @@ def validate_delta(scored):
 
 
 def select_silver_candidates(silver_path, gold_path, counts, *, max_cc=MAX_NEW_CC_DOCS,
-                             per_crawl=10000, max_other=MAX_NEW_DOCS):
+                             per_crawl=10000, max_other=MAX_NEW_DOCS, min_tokens=0, max_chars=None):
+    """Docs below min_tokens are never scored: under ~50 tokens the features measure
+    length, not authorship. They stay out of gold and are re-filtered each run."""
     with id_database() as conn:
         load_ids(conn, 'scored', gold_path)
         conn.execute('CREATE TABLE candidates (doc_id TEXT PRIMARY KEY, source TEXT, '
                      'crawl TEXT, created TEXT, sequence INTEGER, payload BLOB)')
         sequence = 0
+        too_short = 0
         with pq.ParquetFile(silver_path) as parquet:
             columns = parquet.schema_arrow.names
             for batch in parquet.iter_batches(batch_size=1000):
@@ -111,6 +115,10 @@ def select_silver_candidates(silver_path, gold_path, counts, *, max_cc=MAX_NEW_C
                     doc_id = row.get('doc_id')
                     if not isinstance(doc_id, str) or not doc_id.strip():
                         raise ValueError('Every silver row must have a nonempty doc_id')
+                    if min_tokens and scorable_token_count(
+                            str(row.get('text') or ''), max_chars) < min_tokens:
+                        too_short += 1
+                        continue
                     created = pd.to_datetime(row.get('created_dt'), utc=True, errors='coerce')
                     conn.execute(
                         'INSERT OR REPLACE INTO candidates SELECT ?,?,?,?,?,? '
@@ -119,6 +127,8 @@ def select_silver_candidates(silver_path, gold_path, counts, *, max_cc=MAX_NEW_C
                          None if pd.isna(created) else created.isoformat(), sequence,
                          pickle.dumps(row), doc_id))
                 conn.commit()
+        if too_short:
+            print(f"[GOLD] Skipped {too_short:,} silver rows under {min_tokens} tokens")
         conn.execute('CREATE TABLE rooms (crawl TEXT PRIMARY KEY, room INTEGER)')
         conn.executemany('INSERT INTO rooms VALUES (?,?)',
                          ((crawl, max(0, per_crawl - count)) for crawl, count in counts.items()))
@@ -226,10 +236,13 @@ class SilverToGoldPipeline:
         scored_count = count_unique_doc_ids(gold_path) if gold_path.exists() else 0
         reconcile_counts(self.engine, seen_count, scored_count)
         cc_config = self.config.get('sources', {}).get('common_crawl', {})
+        detection = self.config.get('detection', {})
         new_df = select_silver_candidates(
             silver_path, gold_path, cc_gold_counts(gold_path),
             max_cc=cc_config.get('max_new_docs_per_run', MAX_NEW_CC_DOCS),
-            per_crawl=cc_config.get('max_rows_per_crawl', 10000))
+            per_crawl=cc_config.get('max_rows_per_crawl', 10000),
+            min_tokens=detection.get('min_tokens', 0),
+            max_chars=detection.get('max_text_length_for_features'))
         print(f"[GOLD] {len(new_df):,} new docs selected to score")
 
         if new_df.empty:

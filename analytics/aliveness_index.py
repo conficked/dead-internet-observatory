@@ -134,6 +134,7 @@ class AlivenessIndexEngine:
         self.bootstrap_seed = int(cfg.get("bootstrap_seed", 0))
         self.scoring_version = self.config.get("detection", {}).get(
             "scoring_version", "legacy-v1")
+        self.min_tokens = int(self.config.get("detection", {}).get("min_tokens", 0))
         if self.source_weights:
             missing_weights = set(self.core_sources) - set(self.source_weights)
             if missing_weights:
@@ -166,8 +167,7 @@ class AlivenessIndexEngine:
 
     # ── Index computation ─────────────────────────────────────────────────────
 
-    @staticmethod
-    def _valid_dated_docs(df):
+    def _valid_dated_docs(self, df):
         df = df.copy()
         raw_dates = df.get("created_dt", pd.Series(pd.NaT, index=df.index))
         dates = pd.to_datetime(raw_dates, errors="coerce", utc=True, format="mixed")
@@ -180,7 +180,15 @@ class AlivenessIndexEngine:
         df = df.loc[~(missing | invalid | future)].copy()
         df["date"] = dates.loc[df.index].dt.strftime("%Y-%m-%d")
         df["aliveness_score"] = pd.to_numeric(df["aliveness_score"], errors="coerce")
-        return df.loc[np.isfinite(df["aliveness_score"])].copy()
+        df = df.loc[np.isfinite(df["aliveness_score"])]
+        if self.min_tokens and "feat_token_count" in df:
+            tokens = pd.to_numeric(df["feat_token_count"], errors="coerce")
+            short = ~tokens.ge(self.min_tokens)
+            if short.any():
+                logging.getLogger(__name__).info(
+                    "[INDEX] Dropped %d rows under %d tokens", int(short.sum()), self.min_tokens)
+            df = df.loc[~short]
+        return df.copy()
 
     def ingest_scored_df(self, df: pd.DataFrame, replace_affected_dates: bool = False):
         """Replace supplied source/category groups (or entire affected dates)."""
@@ -351,7 +359,8 @@ class AlivenessIndexEngine:
                    GROUP BY d.date, d.source, d.category, cluster_id, scoring_version"""
             ).fetchall()
 
-        if not rows:
+        today = datetime.now(timezone.utc).date().isoformat()
+        if not any(str(row["date"]) < today for row in rows):
             with self._conn() as conn:
                 conn.execute("DELETE FROM composite_index")
                 conn.execute("DELETE FROM index_quality")
@@ -362,18 +371,16 @@ class AlivenessIndexEngine:
         daily = pd.DataFrame([dict(row) for row in rows])
         clusters = pd.DataFrame([dict(row) for row in cluster_rows]) if cluster_rows else pd.DataFrame(
             columns=["date", "source", "category", "cluster_id", "scoring_version", "score_sum", "n"])
-        # Collectors occasionally stamp a record ahead of today (a 2027-09-30 mastodon
-        # row reached composite_index and index_quality). A future date is never a
-        # completion of the observation window, so it must not enter the headline.
-        horizon = datetime.now(timezone.utc).date().isoformat()
-        future = sorted(set(daily["date"].astype(str)) - set(
-            daily.loc[daily["date"].astype(str) <= horizon, "date"].astype(str)))
+        # Only completed UTC days enter the headline. Today is still being collected
+        # (a 422-doc, 0.16-coverage partial day was published), and a future date
+        # (a 2027-09-30 mastodon row) is a collector stamping error.
+        future = sorted(date for date in set(daily["date"].astype(str)) if date > today)
         if future:
             logging.getLogger("aliveness_index").warning(
                 "Skipping future-dated daily groups: %s", ", ".join(future[:5]))
-        daily = daily[daily["date"].astype(str) <= horizon]
+        daily = daily[daily["date"].astype(str) < today]
         if clusters is not None and not clusters.empty:
-            clusters = clusters[clusters["date"].astype(str) <= horizon]
+            clusters = clusters[clusters["date"].astype(str) < today]
         current = self.scoring_version
         source_rows = []
         noncurrent_by_date = {}

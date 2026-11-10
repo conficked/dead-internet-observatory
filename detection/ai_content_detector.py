@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from .linguistic_features import extract_features, features_to_scores, resolve_feature_scaling
+from .linguistic_features import extract_features, features_to_scores, resolve_feature_scaling, tokenise
 
 
 # ── Weights (must match config/config.yaml detection.weights) ────────────────
@@ -41,11 +41,22 @@ def load_scoring_config(config_path: str = "config/config.yaml"):
     if not version:
         raise ValueError("detection.scoring_version is required")
     scaling = resolve_feature_scaling(detection.get("feature_scaling") or {})
-    return version, validate_weights(detection.get("weights", {})), scaling
+    max_chars = detection.get("max_text_length_for_features")
+    return version, validate_weights(detection.get("weights", {})), scaling, max_chars
 
 
-def _score_document(text: str, version: str, weights: Dict[str, float], scaling: Dict) -> Dict:
-    features = extract_features(text)
+def feature_text(text: str, max_chars: Optional[int]) -> str:
+    """The exact text features are computed on: every source is capped at one length."""
+    return text[:max_chars] if max_chars else text
+
+
+def scorable_token_count(text: str, max_chars: Optional[int]) -> int:
+    return len(tokenise(feature_text(text, max_chars)))
+
+
+def _score_document(text: str, version: str, weights: Dict[str, float], scaling: Dict,
+                    max_chars: Optional[int] = None) -> Dict:
+    features = extract_features(feature_text(text, max_chars))
     sub_scores = features_to_scores(features, scaling)
     composite = sum(sub_scores.get(name, 0.5) * weight
                     for name, weight in weights.items()) * 100.0
@@ -64,9 +75,9 @@ def score_document(text: str, timestamps: Optional[List[float]] = None,
     Score a single document.
     Returns dict with raw features, sub-scores, and composite aliveness_score [0, 100].
     """
-    version, configured_weights, scaling = load_scoring_config(config_path)
+    version, configured_weights, scaling, max_chars = load_scoring_config(config_path)
     resolved_weights = validate_weights(weights) if weights else configured_weights
-    return _score_document(text, version, resolved_weights, scaling)
+    return _score_document(text, version, resolved_weights, scaling, max_chars)
 
 
 def score_dataframe(
@@ -81,7 +92,7 @@ def score_dataframe(
     Adds aliveness_score + all feature/sub-score columns in place.
     """
     print(f"[DETECTOR] Scoring {len(df):,} documents …")
-    version, configured_weights, scaling = load_scoring_config(config_path)
+    version, configured_weights, scaling, max_chars = load_scoring_config(config_path)
     resolved_weights = validate_weights(weights) if weights else configured_weights
     print(f"[DETECTOR] Scoring regime: {version}")
 
@@ -90,7 +101,7 @@ def score_dataframe(
         batch = df.iloc[i : i + batch_size]
         for _, row in batch.iterrows():
             text = str(row.get(text_col, "") or "")
-            scored = _score_document(text, version, resolved_weights, scaling)
+            scored = _score_document(text, version, resolved_weights, scaling, max_chars)
             results.append(scored)
         if (i // batch_size) % 10 == 0:
             print(f"  … {min(i + batch_size, len(df)):,}/{len(df):,}")
