@@ -56,6 +56,7 @@ ROUTES = {
     "/challenge": (200, page("Just a moment...", "Checking your browser before accessing.")),
     "/": (200, page("Home", OTHER)),
     "/new-home-of-article": (200, page("Mill site", ARTICLE)),
+    "/redesigned": (200, page("Mill site", OTHER + " " + ARTICLE + " " + OTHER.upper())),
 }
 REDIRECTS = {"/to-home": "/", "/moved": "/new-home-of-article"}
 
@@ -176,6 +177,7 @@ EXPECTED = {
     "/soft": "soft_404", "/parked": "parked", "/blocked": "blocked", "/error": "server_error",
     "/challenge": "blocked", "/to-home": "redirect_home", "/moved": "moved",
 }
+SKETCH_EXPECTED = dict(EXPECTED, **{"/redesigned": "intact", "/": "reachable"})
 
 
 def test_checker_end_to_end(server, tmp_path):
@@ -193,6 +195,29 @@ def test_checker_end_to_end(server, tmp_path):
     # rerun resumes: nothing left to do
     again = checker.run(records, str(out), workers=4)
     assert again["checked"] == 0 and again["previously_done"] == len(EXPECTED)
+
+
+def test_checker_with_sketch_handles_redesign_and_front_pages(server, tmp_path):
+    from linkrot.fingerprint import sketch
+    records = [{"id": f"{i:016x}", "url": server + path, "host": "127.0.0.1",
+                "crawl_date": "2015-03-01", "simhash": fingerprint(ARTICLE), "sketch": sketch(ARTICLE)}
+               for i, path in enumerate(SKETCH_EXPECTED)]
+    out = tmp_path / "results.jsonl"
+    checker.run(records, str(out), workers=4)
+    got = {r["id"]: r for r in checker.read_jsonl(str(out))}
+    for i, (path, status) in enumerate(SKETCH_EXPECTED.items()):
+        assert got[f"{i:016x}"]["status"] == status, (path, got[f"{i:016x}"])
+    intact = got[f"{list(SKETCH_EXPECTED).index('/intact'):016x}"]
+    assert intact["retained"] == 1.0
+
+
+def test_retained_estimates_share_of_wording():
+    from linkrot.fingerprint import retained, sketch
+    sk = sketch(ARTICLE)
+    assert retained(sk, ARTICLE) == 1.0
+    assert retained(sk, OTHER) < 0.1
+    assert 0.35 <= retained(sk, EDITED) < 1.0
+    assert retained(None, ARTICLE) is None and sketch("tiny") is None
 
 
 def test_resume_survives_torn_tail(tmp_path):

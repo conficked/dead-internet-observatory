@@ -27,6 +27,15 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Pull the latest census data
+        run: |
+          pip install -q "huggingface_hub>=0.24"
+          for f in summary graveyard history; do
+            python -m linkrot.hf get "linkrot/site/$f.json" "site/data/$f.json" || true
+          done
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

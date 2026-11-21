@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Dict, Iterable, Iterator, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-from linkrot.fingerprint import simhash, to_hex
+from linkrot.fingerprint import simhash, sketch, to_hex
 
 COLUMNS = ["source", "url", "domain", "category", "crawl_partition", "created_dt",
            "text", "text_length"]
@@ -123,6 +123,7 @@ def record(url: str, crawl: str, row: Dict) -> Dict:
         "category": row.get("category") or "web",
         "text_length": int(row.get("text_length") or len(text)),
         "simhash": to_hex(simhash(text)),
+        "sketch": sketch(text),
         "last_words": last_words(text),
     }
 

@@ -7,9 +7,12 @@ Fates are grouped into four buckets:
     dead     not_found, soft_404, redirect_home, parked, defunct, domain_gone
     unknown  blocked, server_error, unreachable
 
-Content comparisons use SimHash Hamming distance (0 = same wording, ~32 = unrelated).
-The thresholds are heuristics, tuned on synthetic pairs, and are published with the
-results so readers can judge them.
+Content is compared by "retained": the share of a bottom-32 sketch of the original
+page's three-word shingles that still appears on the live page. It holds up when a
+page gains new navigation or a new design around the same text. Front pages that
+still answer count as alive whatever their text, since a front page is meant to
+change. Older samples without a sketch fall back to SimHash distance. Thresholds
+are heuristics and are published with the results.
 """
 
 import re
@@ -17,10 +20,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlsplit
 
-from linkrot.fingerprint import from_hex, hamming, html_to_text, simhash
+from linkrot.fingerprint import from_hex, hamming, html_to_text, retained, simhash
 
-INTACT_MAX = 10
+INTACT_MAX = 10      # SimHash fallback
 EDITED_MAX = 22
+INTACT_MIN_RETAINED = 0.75
+EDITED_MIN_RETAINED = 0.35
 
 BUCKETS = {
     "intact": "alive", "edited": "alive", "moved": "alive", "reachable": "alive",
@@ -86,6 +91,7 @@ class Verdict:
     status: str
     bucket: str
     distance: Optional[int] = None
+    retained: Optional[float] = None
     title: str = ""
     notes: list = field(default_factory=list)
 
@@ -124,7 +130,8 @@ def verdict(status: str, **kw) -> Verdict:
     return Verdict(status=status, bucket=BUCKETS[status], **kw)
 
 
-def classify(original_url: str, original_simhash: Optional[str], fetch: Fetch) -> Verdict:
+def classify(original_url: str, original_simhash: Optional[str], fetch: Fetch,
+             original_sketch: Optional[list] = None) -> Verdict:
     if fetch.error:
         if fetch.error == "dns_nxdomain":
             return verdict("domain_gone")
@@ -153,29 +160,38 @@ def classify(original_url: str, original_simhash: Optional[str], fetch: Fetch) -
     if PARKED_TEXT.search(head) and len(text) < 6000:
         return verdict("parked", title=title)
 
+    # How much of the original wording survives
+    kept = retained(original_sketch, text) if original_sketch and text else None
     original = from_hex(original_simhash)
     current = simhash(text) if text else None
     distance = hamming(original, current) if original is not None and current is not None else None
-    similar = distance is not None and distance <= EDITED_MAX
+    if kept is not None:
+        similar = kept >= EDITED_MIN_RETAINED
+        level = "intact" if kept >= INTACT_MIN_RETAINED else "edited" if similar else "replaced"
+    elif distance is not None:
+        similar = distance <= EDITED_MAX
+        level = "intact" if distance <= INTACT_MAX else "edited" if similar else "replaced"
+    else:
+        similar, level = False, None
+    extra = {"distance": distance, "retained": kept, "title": title}
 
     moved_here = not same_location(original_url, final)
-    if moved_here and is_root(final) and not is_root(original_url) and not similar:
-        return verdict("redirect_home", distance=distance, title=title)
+    front = is_root(original_url)
+    if moved_here and is_root(final) and not front and not similar:
+        return verdict("redirect_home", **extra)
 
     if not similar:
         if DEFUNCT_TEXT.search(head) and len(text) < 3000:
-            return verdict("defunct", distance=distance, title=title)
+            return verdict("defunct", **extra)
         if NOT_FOUND_TEXT.search(title) or (NOT_FOUND_TEXT.search(text[:600]) and len(text) < 4000):
-            return verdict("soft_404", distance=distance, title=title)
+            return verdict("soft_404", **extra)
 
-    if distance is None:
+    if front and not similar:
+        return verdict("reachable", notes=["front_page"], **extra)
+    if level is None:
         if moved_here and _site(final_host) != _site(_host(original_url)):
-            return verdict("moved", title=title, notes=["offsite_unverified"])
-        return verdict("reachable", title=title, notes=["content_not_compared"])
+            return verdict("moved", notes=["offsite_unverified"], **extra)
+        return verdict("reachable", notes=["content_not_compared"], **extra)
     if moved_here:
-        return verdict("moved" if similar else "replaced", distance=distance, title=title)
-    if distance <= INTACT_MAX:
-        return verdict("intact", distance=distance, title=title)
-    if distance <= EDITED_MAX:
-        return verdict("edited", distance=distance, title=title)
-    return verdict("replaced", distance=distance, title=title)
+        return verdict("moved" if similar else "replaced", **extra)
+    return verdict(level, **extra)

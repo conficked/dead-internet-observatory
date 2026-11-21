@@ -185,7 +185,7 @@ class HostGate:
 def check_one(rec: Dict, gate: HostGate) -> Dict:
     with gate(rec.get("host", "")):
         got = fetch(rec["url"])
-    v = classify(rec["url"], rec.get("simhash"), got)
+    v = classify(rec["url"], rec.get("simhash"), got, rec.get("sketch"))
     out = {
         "id": rec["id"],
         "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -195,6 +195,7 @@ def check_one(rec: Dict, gate: HostGate) -> Dict:
         "error": got.error,
         "redirects": got.redirects,
         "distance": v.distance,
+        "retained": v.retained,
         "tls_invalid": got.tls_invalid,
         "elapsed_ms": got.elapsed_ms,
         "title": v.title[:160],
@@ -309,8 +310,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     records = [r for r in read_jsonl_gz(args.sample) if in_shard(r["id"], args.shard, args.shards)]
-    if args.limit:
-        records = records[: args.limit]
+    if args.limit:  # a spread across crawls, not the oldest N
+        records = sorted(records, key=lambda r: r["id"])[: args.limit]
     print(f"[check] shard {args.shard}/{args.shards}: {len(records):,} URLs", flush=True)
     summary = run(records, args.out, workers=args.workers,
                   time_budget=args.time_budget or None, seed=args.shard)

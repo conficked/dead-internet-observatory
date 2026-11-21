@@ -15,7 +15,8 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
-from linkrot.classify import BUCKETS, EDITED_MAX, INTACT_MAX
+from linkrot.classify import (BUCKETS, EDITED_MAX, EDITED_MIN_RETAINED, INTACT_MAX,
+                              INTACT_MIN_RETAINED)
 from linkrot.sample import read_jsonl_gz, write_jsonl_gz
 
 BUCKET_ORDER = ["alive", "drifted", "dead", "unknown"]
@@ -162,6 +163,12 @@ def summarize(rows: List[Dict], census_day: date) -> Dict:
             hist[min(r["distance"], 40) // 2 * 2] += 1
     distance_hist = [{"from": k, "n": hist[k]} for k in range(0, 42, 2)]
 
+    kept = Counter()
+    for r in checked:
+        if r.get("retained") is not None:
+            kept[min(int(r["retained"] * 10), 9)] += 1
+    retained_hist = [{"from": k / 10, "n": kept[k]} for k in range(10)]
+
     hosts = len({r.get("host") for r in checked})
     crawl_days = sorted(d for d in (parse_day(r.get("crawl_date")) for r in rows) if d)
     return {
@@ -197,8 +204,10 @@ def summarize(rows: List[Dict], census_day: date) -> Dict:
         "dead_breakdown": dead_breakdown,
         "archive": archive,
         "distance_hist": distance_hist,
-        "method": {"intact_max_distance": INTACT_MAX, "edited_max_distance": EDITED_MAX,
-                   "simhash_bits": 64, "shingle_words": 3},
+        "retained_hist": retained_hist,
+        "method": {"intact_min_retained": INTACT_MIN_RETAINED, "edited_min_retained": EDITED_MIN_RETAINED,
+                   "intact_max_distance": INTACT_MAX, "edited_max_distance": EDITED_MAX,
+                   "sketch_size": 32, "shingle_words": 3},
     }
 
 

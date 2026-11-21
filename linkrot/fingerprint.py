@@ -40,6 +40,31 @@ def simhash(text: str, shingle: int = 3) -> Optional[int]:
     return value
 
 
+def shingle_hashes(text: str, shingle: int = 3) -> set:
+    """32-bit hashes of every word shingle in the text."""
+    words = tokens(text)
+    return {_hash64(" ".join(words[i:i + shingle])) & 0xFFFFFFFF
+            for i in range(len(words) - shingle + 1)}
+
+
+def sketch(text: str, k: int = 32) -> Optional[List[int]]:
+    """Bottom-k sketch: the k smallest shingle hashes, a fixed-size sample of the wording."""
+    hashes = shingle_hashes(text)
+    if len(hashes) < 8:
+        return None
+    return sorted(hashes)[:k]
+
+
+def retained(original_sketch: Optional[List[int]], current_text: str) -> Optional[float]:
+    """Estimated share of the original wording that still appears on the page."""
+    if not original_sketch:
+        return None
+    current = shingle_hashes(current_text)
+    if not current:
+        return 0.0
+    return round(sum(1 for h in original_sketch if h in current) / len(original_sketch), 3)
+
+
 def hamming(a: int, b: int) -> int:
     return bin(a ^ b).count("1")
 
