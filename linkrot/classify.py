@@ -114,6 +114,23 @@ def _path(url: str) -> str:
     return (parts.path or "/").rstrip("/") or "/"
 
 
+ERROR_URL = re.compile(r"(\b404\b|not[-_]?found|pagenotfound|/error\b|errorpage)", re.I)
+TITLE_WORD = re.compile(r"[a-z0-9]+")
+
+
+def title_match(original_first_line: str, title: str) -> bool:
+    """True when the live title says what the page's first captured line said."""
+    a = set(TITLE_WORD.findall((original_first_line or "").lower()))
+    b = set(TITLE_WORD.findall((title or "").lower()))
+    if len(a) < 3 or len(b) < 3:
+        return False
+    return len(a & b) / len(a | b) >= 0.6 or (len(a & b) >= 4 and len(a & b) / len(a) >= 0.8)
+
+
+def depth(url: str) -> int:
+    return len([p for p in urlsplit(url).path.split("/") if p])
+
+
 def same_location(original: str, final: str) -> bool:
     """True when the redirect only changed scheme, www, or a trailing slash."""
     a, b = urlsplit(original), urlsplit(final)
@@ -131,7 +148,7 @@ def verdict(status: str, **kw) -> Verdict:
 
 
 def classify(original_url: str, original_simhash: Optional[str], fetch: Fetch,
-             original_sketch: Optional[list] = None) -> Verdict:
+             original_sketch: Optional[list] = None, original_first_line: str = "") -> Verdict:
     if fetch.error:
         if fetch.error == "dns_nxdomain":
             return verdict("domain_gone")
@@ -165,20 +182,28 @@ def classify(original_url: str, original_simhash: Optional[str], fetch: Fetch,
     original = from_hex(original_simhash)
     current = simhash(text) if text else None
     distance = hamming(original, current) if original is not None and current is not None else None
+    same_title = title_match(original_first_line, title)
     if kept is not None:
-        similar = kept >= EDITED_MIN_RETAINED
+        similar = kept >= EDITED_MIN_RETAINED or (same_title and kept >= 0.1)
         level = "intact" if kept >= INTACT_MIN_RETAINED else "edited" if similar else "replaced"
     elif distance is not None:
-        similar = distance <= EDITED_MAX
+        similar = distance <= EDITED_MAX or same_title
         level = "intact" if distance <= INTACT_MAX else "edited" if similar else "replaced"
+    elif same_title:
+        similar, level = True, "edited"
     else:
         similar, level = False, None
     extra = {"distance": distance, "retained": kept, "title": title}
 
     moved_here = not same_location(original_url, final)
     front = is_root(original_url)
-    if moved_here and is_root(final) and not front and not similar:
-        return verdict("redirect_home", **extra)
+    if not similar and moved_here and ERROR_URL.search(urlsplit(final).path + "?" + urlsplit(final).query):
+        return verdict("soft_404", **extra)
+    if moved_here and not front and not similar:
+        lands_home = (urlsplit(final).path or "/").lower() in ROOT_PATHS
+        lands_index = depth(final) <= 1 and depth(original_url) >= 2
+        if lands_home or lands_index:
+            return verdict("redirect_home", notes=["index"] if not lands_home else [], **extra)
 
     if not similar:
         if DEFUNCT_TEXT.search(head) and len(text) < 3000:

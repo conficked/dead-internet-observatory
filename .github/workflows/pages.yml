@@ -36,6 +36,8 @@ jobs:
           for f in summary graveyard history; do
             python -m linkrot.hf get "linkrot/site/$f.json" "site/data/$f.json" || true
           done
+      - name: Stamp the build
+        run: sed -i "s/__BUILD__/${GITHUB_SHA::7}-${GITHUB_RUN_ID}/g" site/index.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
