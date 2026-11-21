@@ -32,10 +32,13 @@ Every page gets one of fourteen fates in four groups:
 | **dead** | not found, soft 404, sent home, parked, defunct, domain gone |
 | **unknown** | blocked, server error, unreachable (left out of every share) |
 
-Text comparison uses 64-bit SimHash fingerprints of three-word shingles: the visible text
-Common Crawl captured against the visible text served today. Distance 0 to 10 is intact,
-11 to 22 is edited, anything above is replaced. The thresholds are heuristics and are
-published on the site.
+Text comparison measures how much of the original wording is still on the page. The sample
+keeps a bottom-32 sketch of each page's three-word shingles from the text Common Crawl
+captured; the checker counts how many of those 32 hashes appear in the live page's text.
+At least 0.75 is intact, at least 0.35 is edited, less is replaced. This holds up when the
+same article gets a new site design around it. A front page that still answers counts as
+alive whatever it says, since front pages are meant to change. The thresholds are heuristics
+and are published on the site.
 
 ## How it runs
 
@@ -47,7 +50,7 @@ linkrot/sample.jsonl.gz ──► 8 parallel shards: linkrot.check
                               one polite GET per URL, classify the fate,
                               Wayback lookups for a random subset of the dead
         ▼
-linkrot.aggregate ──► site/data/*.json ──► GitHub Pages
+linkrot.aggregate ──► linkrot/site/*.json on Hugging Face ──► GitHub Pages
                   └─► linkrot/census/census-DATE.jsonl.gz on Hugging Face
 ```
 
@@ -68,14 +71,23 @@ python -m http.server -d site 8000
 ```
 
 Tests: `pytest tests/test_linkrot.py` (includes an end-to-end run against a local server
-that serves every fate).
+that serves every fate). `python -m linkrot.report` prints a tuning report; the census
+workflow runs it, so the job log shows examples of each fate.
+
+### Site
+
+A static page in `site/`: black, monospace, built from characters. Glyph density carries the
+data (`█` alive, `▒` changed, `░` dead but archived, `·` dead and lost). The departures board
+is a custom [ascii.rest](https://ascii.rest) piece (`site/pieces/departed.js`, adapted from its
+split-flap board, MIT); TV static and the candle are ascii.rest library pieces.
 
 ### Data
 
 - Sample: `linkrot/sample.jsonl.gz` in the [Hugging Face dataset](https://huggingface.co/datasets/conficked/dead-internet-observatory)
 - Each census: `linkrot/census/census-YYYY-MM-DD.jsonl.gz`, one row per URL with its fate,
   HTTP status, redirect target, text distance and archive status
-- Site data: `site/data/summary.json`, `graveyard.json`, `history.json`
+- Site data: `linkrot/site/summary.json`, `graveyard.json`, `history.json` (pulled into
+  `site/data/` at deploy time; `master` is protected, so data never goes through git)
 
 ## Limits
 
