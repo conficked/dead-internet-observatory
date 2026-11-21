@@ -3,155 +3,100 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Dead Internet Observatory · How the web actually dies</title>
-<meta name="description" content="A link-rot census: a fixed sample of web pages captured by Common Crawl since 2013, revisited to see which still exist, which changed, and which are gone.">
-<meta property="og:title" content="Dead Internet Observatory: how the web actually dies">
-<meta property="og:description" content="A census of web pages captured since 2013, revisited to measure link rot, content drift and what the archive kept.">
+<title>dead internet observatory</title>
+<meta name="description" content="A monthly census of web pages captured by Common Crawl since 2013: which still exist, which changed, which are gone.">
+<meta property="og:title" content="dead internet observatory">
+<meta property="og:description" content="A monthly census of web pages captured since 2013: which still exist, which changed, which are gone.">
+<meta name="theme-color" content="#000000">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M6 30V12a10 10 0 0 1 20 0v18z' fill='%23d95926'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23000'/%3E%3Crect x='3' y='3' width='4' height='4' fill='%23ddd'/%3E%3Crect x='9' y='9' width='4' height='4' fill='%23555'/%3E%3C/svg%3E">
+<script type="module" src="https://ascii.rest/ascii.js"></script>
 </head>
 <body>
-<div class="viz-root">
 
-<header class="masthead">
-  <div class="wrap">
-    <p class="kicker">Dead Internet Observatory</p>
-    <h1>How the web <em>actually</em> dies</h1>
-    <p class="lede" id="lede">A census of web pages captured by Common Crawl since 2013, revisited to see which still exist, which changed, and which are gone.</p>
-    <pre class="rule" aria-hidden="true">+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+</pre>
-  </div>
+<header class="top">
+  <span class="mark">dead internet observatory</span>
+  <span class="meta" id="meta"></span>
 </header>
 
-<main class="wrap">
+<main>
 
-  <section id="empty" class="empty" hidden>
-    <h2>The first census is underway</h2>
-    <p>The sample has been drawn and the pages are being revisited. Results appear here when the run finishes.</p>
+  <section id="nosignal" class="nosignal" hidden>
+    <ascii-art piece="tv-static" label="no signal"></ascii-art>
+    <p class="dim">no census yet</p>
   </section>
 
   <section id="hero" class="hero" hidden>
-    <div class="hero-main">
-      <div class="hero-number" id="h-dead">–</div>
-      <p class="hero-caption" id="h-dead-caption"></p>
+    <div class="hero-num">
+      <pre id="bignum"></pre>
+      <span class="caption" id="bigcap">gone</span>
     </div>
-    <div class="tiles">
-      <div class="tile"><span class="tile-value" id="h-half">–</span><span class="tile-label">half-life of a page, years</span></div>
-      <div class="tile"><span class="tile-value" id="h-unchanged">–</span><span class="tile-label">half-life of its wording, years</span></div>
-      <div class="tile"><span class="tile-value" id="h-domain">–</span><span class="tile-label">whole domain gone</span></div>
-      <div class="tile"><span class="tile-value" id="h-lost">–</span><span class="tile-label">dead and never archived</span></div>
+    <div class="hero-field">
+      <pre id="field" class="field" role="img"></pre>
+      <div class="key" id="key"></div>
     </div>
   </section>
 
-  <section id="years" class="panel" hidden>
-    <header class="panel-head">
-      <h2>Every year of the web, revisited</h2>
-      <p class="panel-sub">Fate of the sampled pages by the year Common Crawl captured them. Shares are of pages with a known fate; the right column is the share we could not judge (blocked, server errors, timeouts).</p>
-    </header>
-    <div class="legend" id="legend-years"></div>
-    <div class="stack-chart" id="chart-years" role="img" aria-label="Stacked bars of alive, drifted and dead shares by capture year"></div>
-    <details class="table-view"><summary>Show as table</summary><div id="table-years"></div></details>
+  <section id="board" class="board" hidden></section>
+
+  <section id="strata" class="block" hidden>
+    <h2 data-n="01">strata</h2>
+    <div id="strata-rows" class="strata"></div>
   </section>
 
-  <section id="survival" class="panel" hidden>
-    <header class="panel-head">
-      <h2>The decay curve</h2>
-      <p class="panel-sub" id="survival-sub">Share of pages still present, by age. The line is an exponential fit; its half-life is the age at which half the pages are gone.</p>
-    </header>
-    <div class="legend" id="legend-survival"></div>
-    <div class="line-chart" id="chart-survival"></div>
+  <section id="decay" class="block" hidden>
+    <h2 data-n="02">decay</h2>
+    <pre id="plot" class="plot" role="img"></pre>
   </section>
 
-  <div class="two-col">
-    <section id="causes" class="panel" hidden>
-      <header class="panel-head">
-        <h2>Causes of death</h2>
-        <p class="panel-sub">How the dead pages died, as a share of all dead pages.</p>
-      </header>
-      <div class="hbar-chart" id="chart-causes"></div>
+  <div class="pair">
+    <section id="causes" class="block" hidden>
+      <h2 data-n="03">cause</h2>
+      <pre id="causes-rows" class="bars"></pre>
     </section>
-
-    <section id="tlds" class="panel" hidden>
-      <header class="panel-head">
-        <h2>Mortality by domain ending</h2>
-        <p class="panel-sub">Dead share among pages with a known fate, with a 95% interval. Endings with at least 150 judged pages.</p>
-      </header>
-      <div class="hbar-chart" id="chart-tlds"></div>
+    <section id="tlds" class="block" hidden>
+      <h2 data-n="04">tld</h2>
+      <pre id="tld-rows" class="bars"></pre>
     </section>
   </div>
 
-  <section id="archive" class="panel archive" hidden>
-    <header class="panel-head">
-      <h2>What the archive kept</h2>
-    </header>
-    <p class="archive-text" id="archive-text"></p>
+  <section id="graves" class="block" hidden>
+    <h2 data-n="05">graves <button type="button" id="shuffle" class="btn">[ shuffle ]</button></h2>
+    <div id="stones" class="stones"></div>
   </section>
 
-  <section id="graveyard" class="panel" hidden>
-    <header class="panel-head graveyard-head">
-      <div>
-        <h2>The graveyard</h2>
-        <p class="panel-sub">Pages from the sample that no longer exist. Each stone links to the Wayback Machine's nearest copy, if one survives.</p>
+  <section id="method" class="block">
+    <details>
+      <summary><h2 data-n="06">method</h2></summary>
+      <div class="method">
+        <pre id="method-facts"></pre>
+        <table class="fates"><tbody id="fates"></tbody></table>
+        <pre class="dim">limits
+  sample of common crawl captures (english only), not the whole web
+  one cloud network makes every visit; blocked sites count as unknown
+  soft-404 and parking detection are pattern based
+  archive coverage is estimated from a random subset</pre>
+        <div id="year-table" class="year-table"></div>
       </div>
-      <div class="graveyard-controls">
-        <label for="grave-year" class="sr-only">Capture year</label>
-        <select id="grave-year"><option value="">All years</option></select>
-        <button type="button" id="grave-shuffle">Dig up others</button>
-      </div>
-    </header>
-    <div class="stones" id="stones"></div>
-  </section>
-
-  <section id="method" class="panel method">
-    <header class="panel-head"><h2>Method</h2></header>
-    <div class="method-grid">
-      <div>
-        <h3>The sample</h3>
-        <p id="m-sample">Up to 1,000 pages from each Common Crawl snapshot collected by this project, chosen by a salted hash of the URL so the same pages are chosen every time. A URL that appears in several crawls counts once, in its earliest crawl. The crawl collector kept English pages only.</p>
-        <h3>The visit</h3>
-        <p>Each page gets one polite GET request: an identifying user agent, at most two requests in flight per site, a 15 second timeout, and the first 512 KB of the body. Redirects are followed. The same sample is revisited each month, so the curve becomes a record of decay over time.</p>
-        <h3>Judging the fate</h3>
-        <p>The visible text of the live page is compared to the text Common Crawl captured, using 64-bit SimHash fingerprints of three-word shingles. Distance 0 means the same wording; around 32 means unrelated text. The thresholds are heuristics and are published here so you can judge them.</p>
-      </div>
-      <div>
-        <table class="defs">
-          <thead><tr><th>Fate</th><th>Meaning</th></tr></thead>
-          <tbody id="defs"></tbody>
-        </table>
-      </div>
-    </div>
-    <h3>Limits</h3>
-    <ul class="limits">
-      <li>This is a sample of what Common Crawl captured, and of the files this project pulled from each crawl. It is not a random sample of the whole web.</li>
-      <li>Every visit comes from one cloud network. Sites that block data-center traffic, demand JavaScript, or geo-restrict show up as <em>unknown</em>, not dead, and are left out of the shares.</li>
-      <li>Soft-404 and parking detection use patterns in the page text and will miss some cases in both directions.</li>
-      <li>"Drifted" pages answer at the same address with different text. Some are real replacements; some are the same article in a new site design. The fingerprint cannot always tell them apart.</li>
-      <li>Archive coverage is estimated from a random subset of dead and drifted pages checked against the Wayback Machine's availability API.</li>
-    </ul>
-    <p class="links" id="links">
-      <a href="https://github.com/conficked/dead-internet-observatory">Source code</a>
-      <a href="https://huggingface.co/datasets/conficked/dead-internet-observatory/tree/main/linkrot">Census data</a>
-    </p>
+    </details>
   </section>
 
 </main>
 
-<footer class="footer">
-  <div class="wrap">
-    <pre aria-hidden="true">  _____
- /     \
- | RIP |
- |     |
-~~~~~~~~~</pre>
-    <p class="epitaph">Every link is a promise someone stopped keeping.</p>
-    <p id="footer-note">Dead Internet Observatory · a project by <a href="https://github.com/conficked">conficked</a></p>
-  </div>
+<footer class="foot">
+  <ascii-art piece="candle" class="candle" label="candle"></ascii-art>
+  <nav>
+    <a href="https://github.com/conficked/dead-internet-observatory">source</a>
+    <a href="https://huggingface.co/datasets/conficked/dead-internet-observatory/tree/main/linkrot">data</a>
+    <a href="https://ascii.rest">ascii.rest</a>
+    <a href="https://github.com/conficked">conficked</a>
+  </nav>
 </footer>
 
-<div class="tooltip" id="tooltip" role="status" aria-live="polite" hidden></div>
-</div>
+<div class="tip" id="tip" hidden></div>
 <script src="app.js"></script>
 </body>
 </html>
