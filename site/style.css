@@ -18,6 +18,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; background: #121211; }
 body { -webkit-font-smoothing: antialiased; }
 .viz-root {
