@@ -11,8 +11,12 @@ on:
       per_crawl:
         description: "URLs per crawl when (re)building the sample"
         default: "1000"
-      resample:
-        description: "Rebuild the sample from gold/scored.parquet"
+      refresh:
+        description: "Add pages from new or short crawls to the sample (monthly runs always do)"
+        type: boolean
+        default: false
+      rebuild:
+        description: "Discard the sample and draw a new one (breaks month-to-month continuity)"
         type: boolean
         default: false
       limit:
@@ -45,24 +49,31 @@ jobs:
           cache-dependency-path: requirements-linkrot.txt
       - run: pip install -r requirements-linkrot.txt
 
-      - name: Reuse the published sample, or build it
+      - name: Reuse, extend or build the sample
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          RESAMPLE: ${{ inputs.resample || false }}
+          REFRESH: ${{ github.event_name == 'schedule' || inputs.refresh == true }}
+          REBUILD: ${{ inputs.rebuild == true }}
           PER_CRAWL: ${{ inputs.per_crawl || '1000' }}
         run: |
           set -euo pipefail
           mkdir -p work
-          if [ "$RESAMPLE" != "true" ] && python -m linkrot.hf get linkrot/sample.jsonl.gz work/sample.jsonl.gz; then
-            echo "Using the published sample."
-            exit 0
+          EXISTING=""
+          if [ "$REBUILD" != "true" ] && python -m linkrot.hf get linkrot/sample.jsonl.gz work/existing.jsonl.gz; then
+            if [ "$REFRESH" != "true" ]; then
+              mv work/existing.jsonl.gz work/sample.jsonl.gz
+              echo "Reusing the published sample."
+              exit 0
+            fi
+            EXISTING="--existing work/existing.jsonl.gz"
+            echo "Extending the published sample with new and short crawls."
+          else
+            echo "Building a new sample."
           fi
-          echo "Building a new sample from gold/scored.parquet (about 6 GB)…"
-          df -h .
           python -m linkrot.hf get gold/scored.parquet work/scored.parquet
-          python -m linkrot.sample --input work/scored.parquet --out work/sample.jsonl.gz --per-crawl "$PER_CRAWL"
-          rm -f work/scored.parquet
-          python -m linkrot.hf put work/sample.jsonl.gz linkrot/sample.jsonl.gz "linkrot: publish census sample"
+          python -m linkrot.sample --input work/scored.parquet --out work/sample.jsonl.gz --per-crawl "$PER_CRAWL" $EXISTING
+          rm -f work/scored.parquet work/existing.jsonl.gz
+          python -m linkrot.hf put work/sample.jsonl.gz linkrot/sample.jsonl.gz "linkrot: update census sample"
 
       - uses: actions/upload-artifact@v4
         with:

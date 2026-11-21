@@ -81,8 +81,18 @@ def slim(row: Dict) -> Dict:
     return {k: row.get(k) for k in ("text", "text_length", "created_dt", "category")}
 
 
-def select(rows: Iterable[Dict], per_crawl: int, salt: str = DEFAULT_SALT) -> List[Dict]:
-    """Keep the ``per_crawl`` lowest-ranked Common Crawl URLs in each crawl."""
+def select(rows: Iterable[Dict], per_crawl: int, salt: str = DEFAULT_SALT,
+           existing: Optional[List[Dict]] = None) -> List[Dict]:
+    """Keep the ``per_crawl`` lowest-ranked Common Crawl URLs in each crawl.
+
+    With ``existing``, the selection is additive: every existing record is kept as it is,
+    URLs already in it are skipped, and each crawl only fills the room it has left.
+    """
+    existing = existing or []
+    tracked = {r["url"] for r in existing}
+    held: Dict[str, int] = {}
+    for r in existing:
+        held[r["crawl"]] = held.get(r["crawl"], 0) + 1
     heaps: Dict[str, list] = {}
     members: Dict[str, set] = {}
     for row in rows:
@@ -92,13 +102,16 @@ def select(rows: Iterable[Dict], per_crawl: int, salt: str = DEFAULT_SALT) -> Li
         crawl = crawl_of(row)
         if not url or not crawl:
             continue
+        room = per_crawl - held.get(crawl, 0)
+        if url in tracked or room <= 0:
+            continue
         key = rank_key(url, salt)
         heap = heaps.setdefault(crawl, [])
         seen = members.setdefault(crawl, set())
         if url in seen:
             continue
         # Keep only the fields a record needs; fingerprints are computed once, after selection.
-        if len(heap) < per_crawl:
+        if len(heap) < room:
             heapq.heappush(heap, (-key, url, slim(row)))
             seen.add(url)
         elif -heap[0][0] > key:
@@ -112,8 +125,8 @@ def select(rows: Iterable[Dict], per_crawl: int, salt: str = DEFAULT_SALT) -> Li
             if url in chosen and chosen[url][0] <= crawl:
                 continue
             chosen[url] = (crawl, row)
-    chosen = {url: record(url, crawl, row) for url, (crawl, row) in chosen.items()}
-    return sorted(chosen.values(), key=lambda r: (r["crawl"], r["id"]))
+    added = [record(url, crawl, row) for url, (crawl, row) in chosen.items()]
+    return sorted(existing + added, key=lambda r: (r["crawl"], r["id"]))
 
 
 def record(url: str, crawl: str, row: Dict) -> Dict:
@@ -170,12 +183,16 @@ def main(argv=None):
     parser.add_argument("--out", required=True, help="output .jsonl.gz")
     parser.add_argument("--per-crawl", type=int, default=1000)
     parser.add_argument("--salt", default=DEFAULT_SALT)
+    parser.add_argument("--existing", default="", help="sample to keep and extend (additive refresh)")
     args = parser.parse_args(argv)
 
-    rows = select(iter_parquet(args.input), args.per_crawl, args.salt)
+    existing = list(read_jsonl_gz(args.existing)) if args.existing else []
+    rows = select(iter_parquet(args.input), args.per_crawl, args.salt, existing)
     count = write_jsonl_gz(args.out, rows)
     crawls = len({r["crawl"] for r in rows})
-    print(f"[sample] {count:,} URLs from {crawls} crawls -> {args.out}")
+    old_crawls = len({r["crawl"] for r in existing})
+    print(f"[sample] {count:,} URLs from {crawls} crawls -> {args.out} "
+          f"(kept {len(existing):,}, added {count - len(existing):,}; {crawls - old_crawls} new crawls)")
 
 
 if __name__ == "__main__":

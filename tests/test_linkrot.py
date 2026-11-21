@@ -138,6 +138,20 @@ def test_select_is_deterministic_capped_and_dedupes_to_earliest_crawl():
     assert a[0]["simhash"] and a[0]["crawl_date"] == "2015-03-01"
 
 
+def test_additive_select_keeps_existing_and_fills_room():
+    first = select(rows(n_per_crawl=20, crawls=("2015/10",)), per_crawl=10)
+    more = list(rows(n_per_crawl=40, crawls=("2015/10",)))
+    more += [{"source": "common_crawl", "url": f"https://new{i}.org/x", "crawl_partition": "2027/01",
+              "created_dt": "2027-01-05T00:00:00Z", "text": ARTICLE} for i in range(30)]
+    grown = select(more, per_crawl=12, existing=first)
+    ids = {r["id"] for r in grown}
+    assert {r["id"] for r in first} <= ids                       # nothing tracked is dropped
+    assert sum(r["crawl"] == "2015-10" for r in grown) == 12     # old crawl topped up to the cap
+    assert sum(r["crawl"] == "2027-01" for r in grown) == 12     # new crawl added
+    assert len({r["url"] for r in grown}) == len(grown)
+    assert select(more, per_crawl=12, existing=grown) == grown   # a second refresh is a no-op
+
+
 def test_select_ignores_other_sources_and_bad_urls():
     out = select([{"source": "common_crawl", "url": "ftp://x", "crawl_partition": "2015/10"},
                   {"source": "reddit", "url": "https://a.com", "crawl_partition": "2015/10"}], 5)

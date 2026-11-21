@@ -55,6 +55,10 @@ linkrot.aggregate ──► linkrot/site/*.json on Hugging Face ──► GitHub
 ```
 
 Everything runs in GitHub Actions (`.github/workflows/linkrot.yml`), monthly and on demand.
+Each monthly run extends the sample before checking it: pages from crawls the collector has
+added since, and more pages for crawls still short of 1,000. The extension is additive, so
+every page already tracked stays tracked and the month-to-month record holds. A manual run can
+`refresh` the same way, or `rebuild` from scratch.
 No servers, no paid APIs. The checker uses only the Python standard library.
 
 Polite by design: an identifying user agent, at most two requests in flight per site, a
