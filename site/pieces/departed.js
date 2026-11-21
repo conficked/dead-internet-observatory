@@ -61,7 +61,7 @@ export default function departed({ title = meta.options.title, stamp = meta.opti
   put(4, 2, "captured");
   put(4, 12, "site");
   put(4, 42, "cause");
-  for (const [r, c, len] of fields) for (let i = 0; i < len; i++) base[r + 1][c + 2 * i] = "▔";
+  for (const [r, c, len] of fields) for (let i = 0; i < len; i++) base[r + 1][c + 2 * i] = "‾";
 
   return (t) => {
     const v = t - LEAD + STEP;

@@ -186,6 +186,10 @@
       const fit = (lam, ch) => { for (let c = L + 1; c <= L + W; c++) { const t = ((c - L - 1) / (W - 1)) * maxAge; put(row(Math.exp(-lam * t)), c, ch, "fit"); } };
       if (unch) fit(unch.lambda_per_year, "·");
       if (surv) fit(surv.lambda_per_year, "·");
+      pts.forEach((p) => {
+        if (p.unchanged != null) put(row(p.unchanged), col(p.age_years), "○", "pt");
+        put(row(p.survival), col(p.age_years), "●", "pt");
+      });
       if (surv && surv.half_life_years <= maxAge) {
         const c = col(surv.half_life_years);
         for (let r = row(0.5); r < H; r++) if (grid[r][c][0] === " ") put(r, c, "┊", "half");
@@ -193,10 +197,6 @@
         const start = c + lab.length < L + W ? c : c - lab.length;
         [...lab].forEach((ch, i) => put(row(0.5) - 1, start + i, ch, "half"));
       }
-      pts.forEach((p) => {
-        if (p.unchanged != null) put(row(p.unchanged), col(p.age_years), "○", "pt");
-        put(row(p.survival), col(p.age_years), "●", "pt");
-      });
       const lines = grid.map((r) => {
         let out = "", cur = null, buf = "";
         const flush = () => { if (buf) out += cur ? `<span class="${cur}">${esc(buf)}</span>` : esc(buf); buf = ""; };
