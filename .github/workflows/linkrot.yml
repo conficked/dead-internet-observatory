@@ -113,8 +113,6 @@ jobs:
     if: always() && needs.sample.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -130,6 +128,9 @@ jobs:
           path: work
           merge-multiple: true
 
+      - name: Restore the census history
+        run: python -m linkrot.hf get linkrot/site/history.json site/data/history.json || echo "No history yet."
+
       - name: Aggregate
         run: |
           set -euo pipefail
@@ -141,25 +142,17 @@ jobs:
             --wayback 'work/wayback-*.jsonl' \
             --site site/data \
             --ledger "work/census-$DAY.jsonl.gz"
+          python -m linkrot.report --sample work/sample.jsonl.gz --results 'work/results-*.jsonl'
           echo "DAY=$DAY" >> "$GITHUB_ENV"
 
-      - name: Publish the ledger to Hugging Face
+      - name: Publish the ledger and site data to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python -m linkrot.hf put "work/census-$DAY.jsonl.gz" "linkrot/census/census-$DAY.jsonl.gz" "linkrot: census $DAY"
-          python -m linkrot.hf put site/data/summary.json "linkrot/census/summary-$DAY.json" "linkrot: summary $DAY"
-
-      - name: Commit site data
-        continue-on-error: true
-        run: |
-          git config user.name "linkrot-census[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add site/data
-          if git diff --cached --quiet; then echo "No data changes."; exit 0; fi
-          git commit -m "linkrot: census results $DAY"
-          git pull --rebase --depth=50 origin "${GITHUB_REF_NAME}" || true
-          git push origin HEAD:"${GITHUB_REF_NAME}"
+          for f in summary graveyard history; do
+            python -m linkrot.hf put "site/data/$f.json" "linkrot/site/$f.json" "linkrot: site data $DAY"
+          done
 
       - uses: actions/upload-pages-artifact@v3
         with:
