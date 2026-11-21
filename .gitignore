@@ -29,6 +29,7 @@ data/silver/
 data/gold/
 data/observatory.db
 *.zip
+work/
 
 # ── Models / caches ──────────────────────────────────────────────────────────
 .cache/

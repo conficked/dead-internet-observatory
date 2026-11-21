@@ -1,0 +1,179 @@
+name: "🪦 Link-rot census"
+
+# Revisit a fixed sample of Common Crawl URLs, classify each page's fate,
+# publish the ledger to Hugging Face and the results to GitHub Pages.
+
+on:
+  schedule:
+    - cron: "17 9 3 * *"   # monthly, on the 3rd
+  workflow_dispatch:
+    inputs:
+      per_crawl:
+        description: "URLs per crawl when (re)building the sample"
+        default: "1000"
+      resample:
+        description: "Rebuild the sample from gold/scored.parquet"
+        type: boolean
+        default: false
+      limit:
+        description: "Check at most N URLs per shard (0 = all; for test runs)"
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linkrot
+  cancel-in-progress: false
+
+env:
+  HF_REPO: conficked/dead-internet-observatory
+  SHARDS: "8"
+
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-linkrot.txt
+      - run: pip install -r requirements-linkrot.txt
+
+      - name: Reuse the published sample, or build it
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          RESAMPLE: ${{ inputs.resample || false }}
+          PER_CRAWL: ${{ inputs.per_crawl || '1000' }}
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          if [ "$RESAMPLE" != "true" ] && python -m linkrot.hf get linkrot/sample.jsonl.gz work/sample.jsonl.gz; then
+            echo "Using the published sample."
+            exit 0
+          fi
+          echo "Building a new sample from gold/scored.parquet (about 6 GB)…"
+          df -h .
+          python -m linkrot.hf get gold/scored.parquet work/scored.parquet
+          python -m linkrot.sample --input work/scored.parquet --out work/sample.jsonl.gz --per-crawl "$PER_CRAWL"
+          rm -f work/scored.parquet
+          python -m linkrot.hf put work/sample.jsonl.gz linkrot/sample.jsonl.gz "linkrot: publish census sample"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sample
+          path: work/sample.jsonl.gz
+          retention-days: 7
+
+  check:
+    needs: sample
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: sample
+          path: work
+      - name: Check shard ${{ matrix.shard }}
+        env:
+          LIMIT: ${{ inputs.limit || '0' }}
+        run: |
+          python -m linkrot.check \
+            --sample work/sample.jsonl.gz \
+            --out work/results-${{ matrix.shard }}.jsonl \
+            --wayback-out work/wayback-${{ matrix.shard }}.jsonl \
+            --shard ${{ matrix.shard }} --shards "$SHARDS" \
+            --workers 48 --wayback-cap 800 --wayback-rate 0.5 \
+            --time-budget 16200 --limit "$LIMIT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.shard }}
+          path: work/*-${{ matrix.shard }}.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish:
+    needs: [sample, check]
+    if: always() && needs.sample.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-linkrot.txt
+      - run: pip install -r requirements-linkrot.txt
+      - uses: actions/download-artifact@v4
+        with:
+          path: work
+          merge-multiple: true
+
+      - name: Aggregate
+        run: |
+          set -euo pipefail
+          ls -la work
+          DAY=$(date -u +%F)
+          python -m linkrot.aggregate \
+            --sample work/sample.jsonl.gz \
+            --results 'work/results-*.jsonl' \
+            --wayback 'work/wayback-*.jsonl' \
+            --site site/data \
+            --ledger "work/census-$DAY.jsonl.gz"
+          echo "DAY=$DAY" >> "$GITHUB_ENV"
+
+      - name: Publish the ledger to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -m linkrot.hf put "work/census-$DAY.jsonl.gz" "linkrot/census/census-$DAY.jsonl.gz" "linkrot: census $DAY"
+          python -m linkrot.hf put site/data/summary.json "linkrot/census/summary-$DAY.json" "linkrot: summary $DAY"
+
+      - name: Commit site data
+        continue-on-error: true
+        run: |
+          git config user.name "linkrot-census[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add site/data
+          if git diff --cached --quiet; then echo "No data changes."; exit 0; fi
+          git commit -m "linkrot: census results $DAY"
+          git pull --rebase --depth=50 origin "${GITHUB_REF_NAME}" || true
+          git push origin HEAD:"${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
