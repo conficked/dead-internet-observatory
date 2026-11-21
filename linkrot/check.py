@@ -185,7 +185,7 @@ class HostGate:
 def check_one(rec: Dict, gate: HostGate) -> Dict:
     with gate(rec.get("host", "")):
         got = fetch(rec["url"])
-    v = classify(rec["url"], rec.get("simhash"), got, rec.get("sketch"))
+    v = classify(rec["url"], rec.get("simhash"), got, rec.get("sketch"), rec.get("last_words", ""))
     out = {
         "id": rec["id"],
         "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

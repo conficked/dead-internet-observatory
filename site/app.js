@@ -6,6 +6,7 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const pct = (x, d = 0) => (x == null ? "–" : `${(x * 100).toFixed(d)}%`);
   const num = (x) => (x == null ? "–" : x.toLocaleString("en-US"));
+  const BUILD = new URL(document.currentScript.src).searchParams.get("v") || "dev";
   const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   const FATES = {
@@ -126,7 +127,7 @@
     const rows = graves.slice().sort(() => Math.random() - 0.5).slice(0, 60)
       .map((g) => [(g.crawl_date || "").slice(0, 4), g.host || "", CAUSE[g.status] || g.status]);
     const el = document.createElement("ascii-art");
-    el.setAttribute("src", "pieces/departed.js");
+    el.setAttribute("src", `pieces/departed.js?v=${BUILD}`);
     el.setAttribute("label", "departures board of dead pages");
     el.setAttribute("options", JSON.stringify({ title: "departed", stamp: s.census_date, rows }));
     $("board").replaceChildren(el);

@@ -309,3 +309,30 @@ def test_merge_later_results_win_and_history_dedupes(tmp_path):
                "headline": {"dead_share": .1, "alive_share": .8, "drifted_share": .1, "unknown_share": 0}}
     path.write_text(json.dumps(update_history(str(path), summary)))
     assert len(update_history(str(path), summary)) == 1
+
+
+def test_title_match_rescues_redesigned_articles_and_rejects_generic_titles():
+    from linkrot.classify import title_match
+    assert title_match("Clone Wars is about to reach Point of No Return", "Clone Wars is about to reach ‘Point of No Return’ – Club Jade")
+    assert not title_match("Blog", "Blog - Blog")
+    assert not title_match("Cheap flights from Khanty-Mansiysk to Ekaterinburg", "Cheap Flights, Airline Tickets & Airfares")
+
+
+def test_classify_redirect_rules():
+    from linkrot.fingerprint import sketch
+    sk = sketch(ARTICLE)
+    other = Fetch(http_status=200, content_type="text/html", body=page("Shop", OTHER))
+    # deep link redirected to a section index
+    f = Fetch(**{**other.__dict__, "final_url": "https://www.abt.com/blog"})
+    assert classify("http://blog.abt.com/2011/10/some-post/", None, f, sk).status == "redirect_home"
+    # deep link redirected to the front page with tracking parameters
+    f = Fetch(**{**other.__dict__, "final_url": "https://www.aviasales.com/?market=ca"})
+    assert classify("http://ca.jetradar.com/routes/hma/svx", None, f, sk).status == "redirect_home"
+    # redirected to an error page
+    f = Fetch(**{**other.__dict__, "final_url": "https://citywire.com/wealth-manager/pagenotfound?x=1"})
+    assert classify("http://citywire.co.uk/wealth-manager/banks/a", None, f, sk).status == "soft_404"
+    # same article, new design, little wording kept but the same title
+    moved = Fetch(http_status=200, content_type="text/html", final_url="https://new.example/2012/11/mill-site-plans",
+                  body=page("County planning board weighs three plans for the old mill site", OTHER + " " + ARTICLE[:180]))
+    v = classify("http://old.example/2012/11/mill", None, moved, sk, "County planning board weighs three plans for the old mill site")
+    assert v.status == "moved", v
