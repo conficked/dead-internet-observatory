@@ -77,6 +77,10 @@ def last_words(text: str, limit: int = 90) -> str:
     return line if len(line) <= limit else line[: limit - 1].rsplit(" ", 1)[0] + "…"
 
 
+def slim(row: Dict) -> Dict:
+    return {k: row.get(k) for k in ("text", "text_length", "created_dt", "category")}
+
+
 def select(rows: Iterable[Dict], per_crawl: int, salt: str = DEFAULT_SALT) -> List[Dict]:
     """Keep the ``per_crawl`` lowest-ranked Common Crawl URLs in each crawl."""
     heaps: Dict[str, list] = {}
@@ -93,20 +97,22 @@ def select(rows: Iterable[Dict], per_crawl: int, salt: str = DEFAULT_SALT) -> Li
         seen = members.setdefault(crawl, set())
         if url in seen:
             continue
+        # Keep only the fields a record needs; fingerprints are computed once, after selection.
         if len(heap) < per_crawl:
-            heapq.heappush(heap, (-key, url, record(url, crawl, row)))
+            heapq.heappush(heap, (-key, url, slim(row)))
             seen.add(url)
         elif -heap[0][0] > key:
-            _, dropped, _ = heapq.heapreplace(heap, (-key, url, record(url, crawl, row)))
+            _, dropped, _ = heapq.heapreplace(heap, (-key, url, slim(row)))
             seen.discard(dropped)
             seen.add(url)
 
-    chosen: Dict[str, Dict] = {}
+    chosen: Dict[str, tuple] = {}
     for crawl in sorted(heaps):
-        for _, url, rec in heaps[crawl]:
-            if url in chosen and chosen[url]["crawl"] <= crawl:
+        for _, url, row in heaps[crawl]:
+            if url in chosen and chosen[url][0] <= crawl:
                 continue
-            chosen[url] = rec
+            chosen[url] = (crawl, row)
+    chosen = {url: record(url, crawl, row) for url, (crawl, row) in chosen.items()}
     return sorted(chosen.values(), key=lambda r: (r["crawl"], r["id"]))
 
 
